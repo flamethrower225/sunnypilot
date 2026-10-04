@@ -10,9 +10,12 @@ Every overlay checks its own toggle in update() and render().
 """
 import pyray as rl
 
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.curve_hologram import CurveHologram
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.disengage_meter import DisengageMeter
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.driver_flags import DriverFlags
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.follow_ghost import FollowGhost
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.hard_brake_flash import HardBrakeFlash
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.lead_wake import LeadWake
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import RadarScope
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.threat_board import ThreatBoard
@@ -20,7 +23,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.track_brackets import Tra
 
 # drawn in this order, warnings last so they sit on top
 HUD_OVERLAY_TYPES: list[type] = [RadarScope, ThreatBoard, DisengageMeter, DriverFlags, HardBrakeFlash]
-ROAD_OVERLAY_TYPES: list[type] = [TrackBrackets]
+ROAD_OVERLAY_TYPES: list[type] = [CurveHologram, FollowGhost, LeadWake, TrackBrackets]
 
 
 class HudOverlays:
