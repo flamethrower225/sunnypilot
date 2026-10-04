@@ -10,8 +10,9 @@ import pyray as rl
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.sunnypilot.onroad.chevron_metrics import ChevronMetrics
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge import LeadGapBadgeState, LeadGapBadgeStyle, LeadLock
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge import LeadGapBadgeState, LeadGapBadgeStyle, LeadLock, RoadPaint
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.lock import LEAD_HALF_WIDTH, LEAD_HEIGHT
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays import RoadOverlays, RoadProjector
 from openpilot.selfdrive.ui.sunnypilot.onroad.rainbow_path import RainbowPath
 from openpilot.selfdrive.ui.sunnypilot.ui_state import MADSState
 from openpilot.system.ui.lib.application import gui_app
@@ -24,6 +25,10 @@ class ModelRendererSP:
     self._width_filter = FirstOrderFilter(0.9, 0.1, 1 / gui_app.target_fps)
     self.lead_lock = LeadLock()
     self._lead_lock_state = LeadGapBadgeState()
+    self.road_paint = RoadPaint()
+    self._road_paint_state = LeadGapBadgeState()
+    self.road_overlays = RoadOverlays()
+    self._projector = RoadProjector(self)
 
   @property
   def _lateral_active(self) -> bool:
@@ -76,3 +81,20 @@ class ModelRendererSP:
 
     if self._lead_lock_state.alpha > 0.01:
       self.lead_lock.render(self._rect, reading, self._lead_lock_state.zone_color.rgb, self._lead_lock_state.alpha, ui_state.is_metric)
+
+  def _draw_road_paint_path(self) -> bool:
+    """Paint style tints the path with the gap zone color. Returns True when it drew the path."""
+    if ui_state.lead_gap_badge != LeadGapBadgeStyle.PAINT:
+      return False
+    self._road_paint_state.update(ui_state.sm)
+    if self._road_paint_state.alpha < 0.01:
+      return False
+    self.road_paint.draw_path(self._rect, self._path.projected_points, self._road_paint_state.zone_color.rgb, self._road_paint_state.alpha)
+    return True
+
+  def _draw_road_overlays(self, sm) -> None:
+    """Things painted on the road, drawn after the path and before the lead chevron."""
+    state = self._road_paint_state
+    if ui_state.lead_gap_badge == LeadGapBadgeStyle.PAINT and state.alpha > 0.01:
+      self.road_paint.draw_decal(self._projector, state.reading, state.zone_color.rgb, state.alpha, ui_state.is_metric)
+    self.road_overlays.render(self._rect, self._projector)

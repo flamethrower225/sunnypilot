@@ -195,6 +195,18 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"StandstillTimer", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"TrueVEgoUI", {PERSISTENT | BACKUP, BOOL, "0"}},
 
+    // HUD overlays
+    {"CurveHologram", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"DisengageHorizon", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"DriverFlags", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"FollowGhost", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"HardBrakeFlash", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"LeadBrakingWake", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"LeadGapHistory", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"RadarScope", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"RadarTrackBrackets", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"ThreatBoard", {PERSISTENT | BACKUP, BOOL, "0"}},
+
     // MADS params
     {"Mads", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"MadsMainCruiseAllowed", {PERSISTENT | BACKUP, BOOL, "1"}},

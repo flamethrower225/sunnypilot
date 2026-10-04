@@ -11,10 +11,13 @@ import pyray as rl
 from openpilot.cereal import log, messaging
 from openpilot.common.parameterized import parameterized
 from openpilot.common.test import OpenpilotTestCase
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.block import BARS
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import distance_bands, gauge_scale, zone_bands
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.history import GapHistory, SAMPLE_PERIOD, WINDOW, GAP_MAX as HISTORY_GAP_MAX
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.lock import LeadLock, MIN_BOX_H, MIN_BOX_W
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, LeadGapMetrics, LeadGapReading, ZoneHysteresis, \
   STOP_DISTANCE, classify_zone, format_gap, get_t_follow, get_target_gap, primary_value, speed_delta, speed_value
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.road_paint import MIN_DECAL_ROOM, decal_lines, decal_room, path_gradient
 
 DT = 0.05  # 20 fps, as on the comma 3X
 INF = math.inf
@@ -190,3 +193,49 @@ class TestLeadLockBox(OpenpilotTestCase):
   def test_close_lead_box_is_capped(self):
     box = LeadLock.pad_box(100, 100, 2000, 900, rl.Rectangle(0, 0, 2100, 1020))
     assert box[2] - box[0] == 2100 * 0.6
+
+
+class TestGapHistory(OpenpilotTestCase):
+  def test_samples_at_a_steady_rate(self):
+    h = GapHistory(DT)
+    reading = LeadGapReading(present=True, gap=1.8, zone=GapZone.GOOD)
+    for _ in range(int(10 / DT)):
+      h.update(reading)
+    assert len(h.samples) == round(10 / SAMPLE_PERIOD)
+
+  def test_window_is_capped(self):
+    h = GapHistory(DT)
+    reading = LeadGapReading(present=True, gap=1.8, zone=GapZone.GOOD)
+    for _ in range(int(60 / DT)):
+      h.update(reading)
+    assert len(h.samples) == round(WINDOW / SAMPLE_PERIOD)
+
+  def test_gaps_without_a_lead_or_at_a_crawl(self):
+    h = GapHistory(SAMPLE_PERIOD)
+    h.update(LeadGapReading(present=False))
+    h.update(LeadGapReading(present=True, gap=40.0, low_speed=True))
+    h.update(LeadGapReading(present=True, gap=7.0, zone=GapZone.OPEN))
+    assert math.isnan(h.samples[0][0]) and math.isnan(h.samples[1][0])
+    assert h.samples[2] == (HISTORY_GAP_MAX, GapZone.OPEN)
+
+
+class TestBlockAndPaint(OpenpilotTestCase):
+  def test_bars_grow_with_the_gap(self):
+    order = [GapZone.CRITICAL, GapZone.CLOSE, GapZone.CAUTION, GapZone.GOOD]
+    assert [BARS[z] for z in order] == [1, 2, 3, 4]
+
+  def test_paint_fades_from_the_stock_path(self):
+    base = path_gradient((255, 0, 0), 0.0).colors[0]
+    full = path_gradient((255, 0, 0), 1.0).colors[0]
+    assert (base.r, base.g, base.b) == (13, 248, 122)
+    assert (full.r, full.g, full.b) == (255, 0, 0)
+
+  def test_decal_lines(self):
+    reading = LeadGapReading(present=True, gap=1.84, v_lead=26.8224, d_rel=48.0)
+    far, near = decal_lines(reading, is_metric=False)
+    assert far[0] == "60 MPH" and not far[3]
+    assert near[0] == "1.8s" and near[3]
+
+  def test_decal_needs_room_in_front_of_the_lead(self):
+    assert decal_room(LeadGapReading(d_rel=48.0)) > MIN_DECAL_ROOM
+    assert decal_room(LeadGapReading(d_rel=16.8)) < MIN_DECAL_ROOM

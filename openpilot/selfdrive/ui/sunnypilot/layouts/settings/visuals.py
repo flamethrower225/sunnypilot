@@ -115,12 +115,65 @@ class VisualsLayout(Widget):
     self._lead_gap_badge = multiple_button_item_sp(
       title=lambda: tr("Lead Gap Badge"),
       description=lambda: tr("Show a large badge with the time gap to the car ahead and its speed, colored from green to red " +
-                             "as the gap closes. Dial and Strip sit at the bottom center. Lock brackets the lead car and " +
-                             "replaces its chevron."),
-      buttons=[lambda: tr("Off"), lambda: tr("Dial"), lambda: tr("Strip"), lambda: tr("Lock")],
+                             "as the gap closes. Dial, Strip and Block sit at the bottom center. Lock brackets the lead car and " +
+                             "replaces its chevron. Paint tints the path and paints the gap on the road."),
+      buttons=[lambda: tr("Off"), lambda: tr("Dial"), lambda: tr("Strip"), lambda: tr("Lock"), lambda: tr("Block"), lambda: tr("Paint")],
       param="LeadGapBadge",
+      button_width=250,
       inline=False
     )
+
+    # HUD overlays, each behind its own toggle
+    self._overlay_defs = {
+      "LeadGapHistory": (
+        lambda: tr("Gap History"),
+        tr("Draw the last 30 seconds of following gap as a line under the lead gap badge. Needs a badge style."),
+      ),
+      "FollowGhost": (
+        lambda: tr("Follow Target Ghost"),
+        tr("Outline the spot on the road where openpilot is trying to place your car behind the lead."),
+      ),
+      "LeadBrakingWake": (
+        lambda: tr("Lead Braking Wake"),
+        tr("When the car ahead brakes hard, show where the driving model predicts it will be in the next few seconds."),
+      ),
+      "CurveHologram": (
+        lambda: tr("Curve Preview"),
+        tr("In curves, light up the path edges by predicted sideways acceleration and show a suggested speed at the sharpest point."),
+      ),
+      "RadarScope": (
+        lambda: tr("Radar Scope"),
+        tr("Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. Needs a car that reports radar tracks."),
+      ),
+      "RadarTrackBrackets": (
+        lambda: tr("Radar Track Brackets"),
+        tr("Mark the radar tracks ahead in the camera view, colored by how quickly you are closing on them."),
+      ),
+      "ThreatBoard": (
+        lambda: tr("Threat Board"),
+        tr("List the nearest radar tracks ranked by time to collision on the right side of the screen."),
+      ),
+      "DisengageHorizon": (
+        lambda: tr("Disengage Risk Meter"),
+        tr("Show the driving model's predicted chance of a disengagement over the next 2 to 10 seconds, under the speed."),
+      ),
+      "HardBrakeFlash": (
+        lambda: tr("Hard Brake Warning"),
+        tr("Flash the screen edges when the driving model predicts hard braking ahead."),
+      ),
+      "DriverFlags": (
+        lambda: tr("Driver Monitoring Flags"),
+        tr("Show PHONE or EYES CLOSED next to the driver monitoring icon when the driver camera detects them."),
+      ),
+    }
+    self._overlay_toggles = {}
+    for param, (title, desc) in self._overlay_defs.items():
+      self._overlay_toggles[param] = toggle_item_sp(
+        title=title,
+        description=desc,
+        param=param,
+        initial_state=ui_state.params.get_bool(param),
+      )
     self._dev_ui_info = multiple_button_item_sp(
       title=lambda: tr("Developer UI"),
       description=lambda: tr("Display real-time parameters and metrics from various sources."),
@@ -133,6 +186,7 @@ class VisualsLayout(Widget):
     items = list(self._toggles.values()) + [
       self._chevron_info,
       self._lead_gap_badge,
+      *self._overlay_toggles.values(),
       self._dev_ui_info,
     ]
     return items
@@ -142,6 +196,8 @@ class VisualsLayout(Widget):
 
     for param in self._toggle_defs:
       self._toggles[param].action_item.set_state(self._params.get_bool(param))
+    for param in self._overlay_defs:
+      self._overlay_toggles[param].action_item.set_state(self._params.get_bool(param))
 
     self._dev_ui_info.action_item.set_selected_button(ui_state.params.get("DevUIInfo", return_default=True))
     self._lead_gap_badge.action_item.set_selected_button(ui_state.params.get("LeadGapBadge", return_default=True))

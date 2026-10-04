@@ -41,6 +41,8 @@ class LeadGapBadgeStyle(IntEnum):
   DIAL = 1
   STRIP = 2
   LOCK = 3
+  BLOCK = 4
+  PAINT = 5
 
 
 class GapZone(IntEnum):
