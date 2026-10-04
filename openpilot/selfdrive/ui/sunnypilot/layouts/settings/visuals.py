@@ -112,6 +112,15 @@ class VisualsLayout(Widget):
       param="ChevronInfo",
       inline=False
     )
+    self._lead_gap_badge = multiple_button_item_sp(
+      title=lambda: tr("Lead Gap Badge"),
+      description=lambda: tr("Show a large badge with the time gap to the car ahead and its speed, colored from green to red " +
+                             "as the gap closes. Dial and Strip sit at the bottom center. Lock brackets the lead car and " +
+                             "replaces its chevron."),
+      buttons=[lambda: tr("Off"), lambda: tr("Dial"), lambda: tr("Strip"), lambda: tr("Lock")],
+      param="LeadGapBadge",
+      inline=False
+    )
     self._dev_ui_info = multiple_button_item_sp(
       title=lambda: tr("Developer UI"),
       description=lambda: tr("Display real-time parameters and metrics from various sources."),
@@ -123,6 +132,7 @@ class VisualsLayout(Widget):
 
     items = list(self._toggles.values()) + [
       self._chevron_info,
+      self._lead_gap_badge,
       self._dev_ui_info,
     ]
     return items
@@ -134,6 +144,7 @@ class VisualsLayout(Widget):
       self._toggles[param].action_item.set_state(self._params.get_bool(param))
 
     self._dev_ui_info.action_item.set_selected_button(ui_state.params.get("DevUIInfo", return_default=True))
+    self._lead_gap_badge.action_item.set_selected_button(ui_state.params.get("LeadGapBadge", return_default=True))
 
     if ui_state.has_longitudinal_control:
       self._chevron_info.set_description(tr(CHEVRON_INFO_DESCRIPTION["enabled"]))

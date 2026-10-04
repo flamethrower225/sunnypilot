@@ -62,6 +62,22 @@ sections:
     - $ref: '#/macros/hide_on_mici'
     enablement:
     - $ref: '#/macros/longitudinal'
+  - key: LeadGapBadge
+    widget: option
+    title: Lead Gap Badge
+    description: Show a large badge with the time gap to the car ahead and its speed, colored from green to red as the
+      gap closes. Dial and Strip sit at the bottom center. Lock brackets the lead car and replaces its chevron.
+    options:
+    - value: 0
+      label: 'Off'
+    - value: 1
+      label: Dial
+    - value: 2
+      label: Strip
+    - value: 3
+      label: Lock
+    visibility:
+    - $ref: '#/macros/hide_on_mici'
 - id: developer_ui
   title: Developer UI Info
   description: Speedometer and debug display options

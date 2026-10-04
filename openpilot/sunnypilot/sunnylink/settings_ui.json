@@ -1480,6 +1480,40 @@
                   "equals": true
                 }
               ]
+            },
+            {
+              "key": "LeadGapBadge",
+              "widget": "option",
+              "title": "Lead Gap Badge",
+              "description": "Show a large badge with the time gap to the car ahead and its speed, colored from green to red as the gap closes. Dial and Strip sit at the bottom center. Lock brackets the lead car and replaces its chevron.",
+              "options": [
+                {
+                  "value": 0,
+                  "label": "Off"
+                },
+                {
+                  "value": 1,
+                  "label": "Dial"
+                },
+                {
+                  "value": 2,
+                  "label": "Strip"
+                },
+                {
+                  "value": 3,
+                  "label": "Lock"
+                }
+              ],
+              "visibility": [
+                {
+                  "type": "not",
+                  "condition": {
+                    "type": "capability",
+                    "field": "device_type",
+                    "equals": "mici"
+                  }
+                }
+              ]
             }
           ]
         },

@@ -130,13 +130,16 @@ class ModelRenderer(Widget, ChevronMetrics, ModelRendererSP):
       self._update_model(lead_one, path_x_array)
       if render_lead_indicator:
         self._update_leads(radar_state, path_x_array)
+      self._update_lead_lock(radar_state, path_x_array)
       self._transform_dirty = False
 
     # Draw elements
     self._draw_lane_lines()
     self._draw_path(sm)
 
-    if render_lead_indicator and radar_state:
+    if self.lead_lock_enabled:
+      self._draw_lead_lock(sm, render_lead_indicator)
+    elif render_lead_indicator and radar_state:
       self._draw_lead_indicator()
       self.chevron_metrics.draw_lead_status(sm, radar_state, self._rect, self._lead_vehicles)
 
