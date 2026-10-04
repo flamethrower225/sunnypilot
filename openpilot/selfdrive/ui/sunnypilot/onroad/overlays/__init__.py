@@ -10,10 +10,13 @@ Every overlay checks its own toggle in update() and render().
 """
 import pyray as rl
 
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.disengage_meter import DisengageMeter
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.driver_flags import DriverFlags
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.hard_brake_flash import HardBrakeFlash
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 
 # drawn in this order
-HUD_OVERLAY_TYPES: list[type] = []
+HUD_OVERLAY_TYPES: list[type] = [DisengageMeter, HardBrakeFlash, DriverFlags]
 ROAD_OVERLAY_TYPES: list[type] = []
 
 
