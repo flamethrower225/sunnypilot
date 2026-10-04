@@ -62,6 +62,73 @@ sections:
     - $ref: '#/macros/hide_on_mici'
     enablement:
     - $ref: '#/macros/longitudinal'
+  - key: LeadGapBadge
+    widget: option
+    title: Lead Gap Badge
+    description: Show a large badge with the time gap to the car ahead and its speed, colored from green to red as the
+      gap closes. Dial, Strip and Block sit at the bottom center. Lock brackets the lead car and replaces its chevron.
+      Paint tints the path and paints the gap on the road.
+    options:
+    - value: 0
+      label: 'Off'
+    - value: 1
+      label: Dial
+    - value: 2
+      label: Strip
+    - value: 3
+      label: Lock
+    - value: 4
+      label: Block
+    - value: 5
+      label: Paint
+    visibility:
+    - $ref: '#/macros/hide_on_mici'
+- id: hud_overlays
+  title: HUD Overlays
+  description: Optional overlays for following distance, radar, the driving model and the driver
+  visibility:
+  - $ref: '#/macros/hide_on_mici'
+  items:
+  - key: LeadGapHistory
+    widget: toggle
+    title: Gap History
+    description: Draw the last 30 seconds of following gap as a line under the lead gap badge. Needs a badge style.
+  - key: FollowGhost
+    widget: toggle
+    title: Follow Target Ghost
+    description: Outline the spot on the road where openpilot is trying to place your car behind the lead.
+  - key: LeadBrakingWake
+    widget: toggle
+    title: Lead Braking Wake
+    description: When the car ahead brakes hard, show where the driving model predicts it will be in the next few seconds.
+  - key: CurveHologram
+    widget: toggle
+    title: Curve Preview
+    description: In curves, light up the path edges by predicted sideways acceleration and show a suggested speed at the sharpest point.
+  - key: RadarScope
+    widget: toggle
+    title: Radar Scope
+    description: Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. Needs a car that reports radar tracks.
+  - key: RadarTrackBrackets
+    widget: toggle
+    title: Radar Track Brackets
+    description: Mark the radar tracks ahead in the camera view, colored by how quickly you are closing on them.
+  - key: ThreatBoard
+    widget: toggle
+    title: Threat Board
+    description: List the nearest radar tracks ranked by time to collision on the right side of the screen.
+  - key: DisengageHorizon
+    widget: toggle
+    title: Disengage Risk Meter
+    description: Show the driving model's predicted chance of a disengagement over the next 2 to 10 seconds, under the speed.
+  - key: HardBrakeFlash
+    widget: toggle
+    title: Hard Brake Warning
+    description: Flash the screen edges when the driving model predicts hard braking ahead.
+  - key: DriverFlags
+    widget: toggle
+    title: Driver Monitoring Flags
+    description: Show PHONE or EYES CLOSED next to the driver monitoring icon when the driver camera detects them.
 - id: developer_ui
   title: Developer UI Info
   description: Speedometer and debug display options

@@ -173,6 +173,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"IsReleaseSpBranch", {CLEAR_ON_MANAGER_START, BOOL}},
     {"LastGPSPositionLLK", {PERSISTENT, STRING}},
     {"LeadDepartAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"LeadGapBadge", {PERSISTENT | BACKUP, INT, "0"}},
     {"MaxTimeOffroad", {PERSISTENT | BACKUP, INT, "1800"}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
     {"OffroadMode", {CLEAR_ON_MANAGER_START, BOOL}},
@@ -193,6 +194,18 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ShowTurnSignals", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"StandstillTimer", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"TrueVEgoUI", {PERSISTENT | BACKUP, BOOL, "0"}},
+
+    // HUD overlays
+    {"CurveHologram", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"DisengageHorizon", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"DriverFlags", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"FollowGhost", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"HardBrakeFlash", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"LeadBrakingWake", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"LeadGapHistory", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"RadarScope", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"RadarTrackBrackets", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"ThreatBoard", {PERSISTENT | BACKUP, BOOL, "0"}},
 
     // MADS params
     {"Mads", {PERSISTENT | BACKUP, BOOL, "1"}},

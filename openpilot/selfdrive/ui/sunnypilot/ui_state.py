@@ -35,7 +35,7 @@ class UIStateSP:
     self.is_sp_release: bool = self.params.get_bool("IsReleaseSpBranch")
     self.sm_services_ext = [
       "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP",
-      "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay"
+      "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay", "radarTracks"
     ]
 
     self.sunnylink_state = SunnylinkState()
@@ -50,6 +50,17 @@ class UIStateSP:
     self.custom_interactive_timeout: int = 0
     self.developer_ui = None
     self.hide_v_ego_ui: bool = False
+    self.lead_gap_badge: int = 0
+    self.curve_hologram: bool = False
+    self.disengage_horizon: bool = False
+    self.driver_flags: bool = False
+    self.follow_ghost: bool = False
+    self.hard_brake_flash: bool = False
+    self.lead_braking_wake: bool = False
+    self.lead_gap_history: bool = False
+    self.radar_scope: bool = False
+    self.radar_track_brackets: bool = False
+    self.threat_board: bool = False
     self.onroad_brightness: int = 0
     self.onroad_brightness_timer: int = 0
     self.onroad_brightness_timer_param: int = 0
@@ -164,6 +175,17 @@ class UIStateSP:
     self.custom_interactive_timeout = self.params.get("InteractivityTimeout", return_default=True)
     self.developer_ui = self.params.get("DevUIInfo")
     self.hide_v_ego_ui = self.params.get_bool("HideVEgoUI")
+    self.lead_gap_badge = self.params.get("LeadGapBadge", return_default=True)
+    self.curve_hologram = self.params.get_bool("CurveHologram")
+    self.disengage_horizon = self.params.get_bool("DisengageHorizon")
+    self.driver_flags = self.params.get_bool("DriverFlags")
+    self.follow_ghost = self.params.get_bool("FollowGhost")
+    self.hard_brake_flash = self.params.get_bool("HardBrakeFlash")
+    self.lead_braking_wake = self.params.get_bool("LeadBrakingWake")
+    self.lead_gap_history = self.params.get_bool("LeadGapHistory")
+    self.radar_scope = self.params.get_bool("RadarScope")
+    self.radar_track_brackets = self.params.get_bool("RadarTrackBrackets")
+    self.threat_board = self.params.get_bool("ThreatBoard")
     self.onroad_brightness = int(float(self.params.get("OnroadScreenOffBrightness", return_default=True)))
     self.onroad_brightness_timer_param = self.params.get("OnroadScreenOffTimer", return_default=True)
     self.rainbow_path = self.params.get_bool("RainbowMode")
