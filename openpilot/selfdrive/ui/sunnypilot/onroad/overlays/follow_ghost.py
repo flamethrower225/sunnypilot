@@ -10,7 +10,7 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import INK, WHITE, draw_text, rgba
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import INK, STROKE_MIN, TEXT_MIN, WHITE, draw_text, rgba
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import STOP_DISTANCE, get_t_follow
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -165,7 +165,7 @@ class FollowGhost:
 
     now = rl.get_time()
     px_per_m = math.hypot(front[1][0] - front[0][0], front[1][1] - front[0][1]) / (GHOST_WIDTH - 2 * GHOST_CORNER)
-    th = float(np.clip(0.045 * px_per_m, 2.2, 6.0))
+    th = float(np.clip(0.06 * px_per_m, 5.0, 10.0))
 
     # soft fill with a sheen that sweeps from the rear to the front now and then
     _fill_convex(outline, rgba(CYAN, 0.15 * alpha))
@@ -185,37 +185,36 @@ class FollowGhost:
       _fill_convex([outline[i], outline[j], rim[j], rim[i]], rgba(CYAN, 0.08 * alpha))
 
     pulse = 0.88 + 0.12 * math.sin(now * 2 * math.pi / 1.6)
-    _outline(rim, th * 0.55, rgba(CYAN, 0.7 * alpha), round_joints=False)
+    _outline(rim, max(th * 0.55, 3.0), rgba(CYAN, 0.7 * alpha), round_joints=False)
     _outline(outline, th * 3.0, rgba(CYAN, 0.16 * alpha * pulse), round_joints=False)
     _outline(outline, th, rgba(ICE, 0.95 * alpha))
-    _line(front[0], front[1], th * 1.4, rgba(WHITE, alpha))
+    _line(front[0], front[1], max(th * 1.4, STROKE_MIN + 2), rgba(WHITE, alpha))
 
-    scale = float(np.clip(0.55 + px_per_m / 90.0, 0.8, 1.2))
-    self._draw_tag(rect, outline, scale, alpha)
+    self._draw_tag(rect, outline, alpha)
 
-  def _draw_tag(self, rect: rl.Rectangle, outline: list[tuple[float, float]], scale: float, alpha: float) -> None:
+  def _draw_tag(self, rect: rl.Rectangle, outline: list[tuple[float, float]], alpha: float) -> None:
     """Tag beside the front of the footprint, on the right unless that runs off the screen. It sits off to the side so it
-    doesn't cover the lead or the path."""
+    doesn't cover the lead or the path, and keeps one size at every distance so it reads at a glance."""
     label = tr("TARGET")
-    size, spacing = 21.0 * scale, 2.2 * scale
+    size, spacing = float(TEXT_MIN), 2.5
     sz = measure_text_cached(self._font_bold, label, int(size), spacing)
-    pad_x, pad_y, stem = 13.0 * scale, 4.0 * scale, 14.0 * scale
+    pad_x, pad_y, stem = 18.0, 6.0, 18.0
     w, h = sz.x + pad_x * 2, sz.y * 0.9 + pad_y * 2
 
     right = max(p[0] for p in outline)
     left = min(p[0] for p in outline)
     front_y = min(p[1] for p in outline)  # the front edge is the far one
-    cy = front_y + 2.0 * scale
+    cy = front_y + 2.0
     if right + stem + w <= rect.x + rect.width - 10:
       x, anchor = right + stem, right
     else:
       x, anchor = left - stem - w, left
     y = max(cy - h / 2, rect.y + 10)
 
-    _line((anchor, cy), (x if x > anchor else x + w, cy), 2.2 * scale, rgba(CYAN, 0.9 * alpha))
+    _line((anchor, cy), (x if x > anchor else x + w, cy), 5.0, rgba(CYAN, 0.9 * alpha))
     roundness = min(1.0, 2 * (h / 2) / min(w, h))
     pill = rl.Rectangle(x, y, w, h)
     rl.draw_rectangle_rounded(rl.Rectangle(x + 1.5, y + 3, w, h), roundness, 12, rgba((0, 0, 0), 0.3 * alpha))
     rl.draw_rectangle_rounded(pill, roundness, 12, rgba(INK, 0.8 * alpha))
-    rl.draw_rectangle_rounded_lines_ex(pill, roundness, 12, 2.2 * scale, rgba(CYAN, 0.9 * alpha))
+    rl.draw_rectangle_rounded_lines_ex(pill, roundness, 12, 4.0, rgba(CYAN, 0.9 * alpha))
     draw_text(self._font_bold, label, size, x + pad_x, y + pad_y * 0.8, rgba(WHITE, alpha), spacing)

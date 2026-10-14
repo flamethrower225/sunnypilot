@@ -34,6 +34,12 @@ ZONE_LABELS = {
   GapZone.CRITICAL: tr_noop("Too close"),
 }
 
+# Glanceability floors, matched to the stock onroad HUD: its smallest text is the 36 px smart cruise chip and the
+# 40 px MAX label, alerts are 66-88 px and the speed is 176 px. Anything read while moving stays at or above these.
+TEXT_MIN = 36     # labels and short words
+STROKE_MIN = 6    # lines that carry information (a graph trace, a bracket)
+DOT_MIN = 8       # radius of dots that carry information
+
 INK = (11, 15, 14)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)

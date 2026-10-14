@@ -15,11 +15,11 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import DeveloperUiState
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import LANE_DISTANCES, MAX_LATERAL, MAX_RANGE, PANEL_H, PANEL_W, \
-  ScopeFrame, ring_points, ring_ranges, scope_frame, scope_rect
+  ScopeFrame, ring_points, ring_radii, scope_frame, scope_rect
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import BOARD_TTC_MAX, FEED_HOLD, MAX_POINTS, NO_TRACK, Lane, RadarFeed, \
   TrackClass, TrackSmoother, classify_motion, display_zone, in_threat_corridor, is_threat, lane_of, lead_track_ids, make_track, \
   match_leads, parse_tracks, rank_threats, select_threats, service_fresh, time_to_collision, ttc_zone
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.threat_board import HEADER_H, PANEL_W as BOARD_W, ROW_H, SLOT_H, board_rect, \
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.threat_board import TOP_PAD, PANEL_W as BOARD_W, ROW_H, SLOT_H, board_rect, \
   format_ttc
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.track_brackets import BOX_HEIGHT, BOX_WIDTH, MAX_TRACKS, MIN_BOX_H, MIN_BOX_W, \
   pad_box, project_box, select_tracks, tagged_tracks
@@ -425,11 +425,9 @@ class TestScopeGeometry(OpenpilotTestCase):
     assert ScopeFrame.visible(d, y) == expected
 
   def test_rings(self):
-    assert [label for _, label in ring_ranges(True)] == ["25", "50", "100"]
-    assert [r for r, _ in ring_ranges(True)] == [25.0, 50.0, 100.0]
-    imperial = ring_ranges(False)
-    assert [label for _, label in imperial] == ["100", "200", "300"]
-    assert abs(imperial[0][0] - 30.48) < 0.01 and imperial[-1][0] < MAX_RANGE
+    assert ring_radii(True) == [25.0, 50.0, 100.0]
+    imperial = ring_radii(False)
+    assert abs(imperial[0] - 30.48) < 0.01 and imperial[-1] < MAX_RANGE
 
   def test_ring_points_stay_on_the_circle(self):
     pts = ring_points(25.0)
@@ -453,12 +451,12 @@ class TestBrackets(OpenpilotTestCase):
     return (sx, sy) if 0 <= sx <= 2160 and 0 <= sy <= 1080 else None
 
   def test_box_size_follows_distance(self):
-    near = project_box(self._pinhole, 20.0, 0.0)
-    far = project_box(self._pinhole, 80.0, 0.0)
+    near = project_box(self._pinhole, 15.0, 0.0)
+    far = project_box(self._pinhole, 60.0, 0.0)
     assert near is not None and far is not None
     assert near[2] - near[0] > 3.5 * (far[2] - far[0])
-    assert abs((near[2] - near[0]) - 1500 * BOX_WIDTH / 20.0) < 1e-6
-    assert abs((near[3] - near[1]) - 1500 * BOX_HEIGHT / 20.0) < 1e-6
+    assert abs((near[2] - near[0]) - 1500 * BOX_WIDTH / 15.0) < 1e-6
+    assert abs((near[3] - near[1]) - 1500 * BOX_HEIGHT / 15.0) < 1e-6
 
   def test_box_stands_on_the_road(self):
     box = project_box(self._pinhole, 40.0, 1.5)
@@ -508,7 +506,7 @@ class TestBrackets(OpenpilotTestCase):
     chosen = select_tracks(clutter + [threat])
     assert len(chosen) == MAX_TRACKS and threat in chosen
 
-  def test_tags_go_to_the_three_most_threatening(self):
+  def test_tags_go_to_the_two_most_threatening(self):
     tracks = [
       track(1, 20.0, 0.0, -10.0),    # ttc 2
       track(2, 40.0, 3.6, -8.0),     # ttc 5
@@ -516,7 +514,7 @@ class TestBrackets(OpenpilotTestCase):
       track(4, 90.0, 0.0, -1.0),     # ttc 90
       track(5, 30.0, 0.0, 2.0),      # opening, but right there
     ]
-    assert tagged_tracks(tracks) == {1, 2, 3}
+    assert tagged_tracks(tracks) == {1, 2}
     assert tagged_tracks(tracks, count=5) == {1, 2, 3, 5}
 
   def test_distant_traffic_pulling_away_is_not_tagged(self):
@@ -548,7 +546,7 @@ class TestBoardLayout(OpenpilotTestCase):
     one = board_rect(HUD, None, ROW_H)
     four = board_rect(HUD, None, 3 * SLOT_H + ROW_H)
     assert four.height - one.height == 3 * SLOT_H
-    assert one.height > HEADER_H + ROW_H
+    assert one.height > TOP_PAD + ROW_H
 
   def test_clear_of_the_wheel_button(self):
     assert board_rect(HUD, None, 0.0).y >= HUD.y + 230

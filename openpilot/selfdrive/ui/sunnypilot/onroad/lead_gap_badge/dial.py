@@ -9,9 +9,9 @@ import math
 import numpy as np
 import pyray as rl
 
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE, ZONE_RGB, GaugeScale, rgba, gauge_scale, \
-  zone_label, delta_label, draw_text_centered, draw_arc, draw_delta_arrow
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import LeadGapReading, primary_value, speed_value
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, TEXT_MIN, WHITE, ZONE_RGB, GaugeScale, rgba, gauge_scale, \
+  zone_label, draw_text_centered, draw_arc, draw_delta_arrow, draw_value_with_unit, measure_value_with_unit
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import LeadGapReading, primary_value, speed_value, speed_delta
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -23,7 +23,6 @@ ARC_RADIUS = 80 * SCALE
 ARC_WIDTH = 13 * SCALE
 BAND_RADIUS = ARC_RADIUS + 11 * SCALE
 BAND_WIDTH = 3 * SCALE
-TICK_RADIUS = ARC_RADIUS - 22 * SCALE
 
 START_ANGLE = 150.0  # 7 o'clock, sweeping clockwise over the top to 5 o'clock
 SWEEP = 240.0
@@ -41,7 +40,6 @@ class GapDial:
 
   def __init__(self):
     self._font_bold = gui_app.font(FontWeight.BOLD)
-    self._font_semi_bold = gui_app.font(FontWeight.SEMI_BOLD)
 
   @staticmethod
   def size() -> float:
@@ -72,36 +70,33 @@ class GapDial:
       rl.draw_line_ex(rl.Vector2(center.x + direction.x * inner, center.y + direction.y * inner),
                       rl.Vector2(center.x + direction.x * outer, center.y + direction.y * outer), 3.5 * SCALE, rgba(WHITE, alpha))
 
-    tick_color = rgba(WHITE, 0.55 * alpha)
-    for i, (value, label) in enumerate(scale.ticks):
-      angle = math.radians(scale_angle(value, scale))
-      label = f"{label}+" if i == len(scale.ticks) - 1 else label
-      draw_text_centered(self._font_bold, label, 10 * SCALE, center.x + TICK_RADIUS * math.cos(angle),
-                         center.y + TICK_RADIUS * math.sin(angle), tick_color)
-
+    # no scale numbers: the arc, its colors and the target tick carry the scale
     if reading.show_ttc:
-      header = tr("TTC {:.1f} S").format(reading.ttc)
+      header = tr("TTC {:.1f}s").format(reading.ttc)
     else:
       header = zone_label(reading).upper()
-    draw_text_centered(self._font_bold, header, 10.5 * SCALE, center.x, center.y - 29 * SCALE, rgba(zone_rgb, alpha), spacing=1.5 * SCALE)
+    draw_text_centered(self._font_bold, header, TEXT_MIN, center.x, center.y - 30 * SCALE, rgba(zone_rgb, alpha), spacing=2)
 
     value, unit = primary_value(reading, is_metric)
-    draw_text_centered(self._font_bold, value, 48 * SCALE, center.x, center.y + 1 * SCALE, rgba(WHITE, alpha))
-    unit_text = tr("SECONDS") if unit == "s" else (tr("FEET") if unit == "ft" else tr("METERS"))
-    draw_text_centered(self._font_bold, unit_text, 10 * SCALE, center.x, center.y + 31 * SCALE, rgba(WHITE, 0.65 * alpha), spacing=SCALE)
+    value_size, unit_size = 48 * SCALE, 44
+    size = measure_value_with_unit(self._font_bold, value, value_size, self._font_bold, unit, unit_size, gap=6)
+    draw_value_with_unit(self._font_bold, value, value_size, self._font_bold, unit, unit_size, center.x - size.x / 2,
+                         center.y + 6 - size.y / 2, rgba(WHITE, alpha), rgba(WHITE, 0.75 * alpha), gap=6)
 
     speed_unit = tr("km/h") if is_metric else tr("mph")
-    draw_text_centered(self._font_bold, f"{speed_value(reading.v_lead, is_metric)} {speed_unit}", 17 * SCALE,
-                       center.x, center.y + 52 * SCALE, rgba(WHITE, alpha))
+    draw_text_centered(self._font_bold, f"{speed_value(reading.v_lead, is_metric)} {speed_unit}", 44,
+                       center.x, center.y + 50 * SCALE, rgba(WHITE, alpha))
 
-    direction, delta_text = delta_label(reading, is_metric)
-    delta_size = 10 * SCALE
-    delta_color = rgba(WHITE, 0.7 * alpha)
-    text_sz = measure_text_cached(self._font_semi_bold, delta_text, int(delta_size))
-    arrow = delta_size * 0.8 if direction else 0.0
-    x = center.x - (text_sz.x + arrow + (delta_size * 0.35 if arrow else 0)) / 2
-    y = center.y + 70.5 * SCALE
-    x += draw_delta_arrow(direction, x, y, arrow, delta_color)
-    if arrow:
-      x += delta_size * 0.35
-    rl.draw_text_ex(self._font_semi_bold, delta_text, rl.Vector2(x, y - text_sz.y / 2), delta_size, 0, delta_color)
+    # speed difference as an arrow and a number, no words
+    delta = speed_delta(reading.v_rel, is_metric)
+    delta_color = rgba(WHITE, 0.8 * alpha)
+    y = center.y + 71 * SCALE
+    if delta == 0:
+      draw_text_centered(self._font_bold, "=", TEXT_MIN, center.x, y, delta_color)
+    else:
+      text = str(abs(delta))
+      text_sz = measure_text_cached(self._font_bold, text, TEXT_MIN)
+      arrow = TEXT_MIN * 0.75
+      x = center.x - (arrow + 10 + text_sz.x) / 2
+      x += draw_delta_arrow(int(np.sign(delta)), x, y, arrow, delta_color) + 10
+      rl.draw_text_ex(self._font_bold, text, rl.Vector2(x, y - text_sz.y / 2), TEXT_MIN, 0, delta_color)

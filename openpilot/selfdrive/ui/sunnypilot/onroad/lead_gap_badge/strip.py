@@ -7,8 +7,8 @@ See the LICENSE.md file in the root directory for more details.
 import numpy as np
 import pyray as rl
 
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, WHITE, ZONE_RGB, rgba, gauge_scale, zone_label, \
-  draw_text, draw_text_centered, draw_value_with_unit, draw_delta_arrow, draw_car_glyph, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, TEXT_MIN, WHITE, ZONE_RGB, rgba, gauge_scale, zone_label, \
+  draw_text, draw_value_with_unit, draw_delta_arrow, draw_car_glyph, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import LeadGapReading, primary_value, speed_value, speed_delta
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -65,7 +65,7 @@ class FollowStrip:
 
   def _draw_readout(self, x: float, y: float, k: float, reading: LeadGapReading, zone_rgb, alpha: float, is_metric: bool) -> None:
     value, unit = primary_value(reading, is_metric)
-    num_size, unit_size, label_size = 7 * k, 3 * k, 1.35 * k
+    num_size, unit_size, label_size = 7 * k, 3 * k, max(TEXT_MIN, 1.35 * k)
     num_h = measure_text_cached(self._font_bold, value, int(num_size)).y
     block_h = num_h + label_size * 1.2
     top = y + (TRACK_HEIGHT * k - block_h) / 2
@@ -76,20 +76,11 @@ class FollowStrip:
   def _draw_track(self, track_x: float, rail_x: float, rail_w: float, y: float, k: float, reading: LeadGapReading, zone_rgb,
                   alpha: float, is_metric: bool) -> None:
     scale = gauge_scale(reading, is_metric, GAP_MAX, DISTANCE_TICKS_METRIC, DISTANCE_TICKS_IMPERIAL)
-    bar_y, bar_h = y + 4.2 * k, 1.1 * k
+    # no scale numbers: the colored bar and the target notch carry the scale
+    bar_y, bar_h = y + 3.95 * k, 1.6 * k
     for zone, lo, hi in scale.bands:
       seg_x = rail_x + rail_w * lo / scale.max_value
-      rl.draw_rectangle_rec(rl.Rectangle(seg_x, bar_y, rail_w * (hi - lo) / scale.max_value, bar_h), rgba(ZONE_RGB[zone], 0.5 * alpha))
-
-    tick_color = rgba(WHITE, 0.6 * alpha)
-    tick_size = 1.15 * k
-    for i, (value, label) in enumerate(scale.ticks):
-      last = i == len(scale.ticks) - 1
-      label = f"{label} {scale.unit}" if last else label
-      sz = measure_text_cached(self._font_semi_bold, label, int(tick_size))
-      tx = rail_x + rail_w * value / scale.max_value
-      tx = tx if i == 0 else (tx - sz.x if last else tx - sz.x / 2)
-      draw_text(self._font_semi_bold, label, tick_size, tx, y + 6.1 * k, tick_color)
+      rl.draw_rectangle_rec(rl.Rectangle(seg_x, bar_y, rail_w * (hi - lo) / scale.max_value, bar_h), rgba(ZONE_RGB[zone], 0.6 * alpha))
 
     car_w = CAR_WIDTH * k
     car_y = y + 3.6 * k
@@ -97,9 +88,8 @@ class FollowStrip:
 
     if scale.target is not None:
       notch_x = rail_x + rail_w * float(np.clip(scale.target / scale.max_value, 0.0, 1.0))
-      notch = rl.Rectangle(notch_x - 0.175 * k, y + 3.7 * k, 0.35 * k, 2.1 * k)
+      notch = rl.Rectangle(notch_x - 0.25 * k, bar_y - 0.9 * k, 0.5 * k, bar_h + 1.8 * k)
       rl.draw_rectangle_rounded(notch, 0.6, 4, rgba(WHITE, alpha))
-      draw_text_centered(self._font_bold, tr("TARGET"), k, notch_x, notch.y + notch.height + 2.4 * k, rgba(WHITE, alpha), spacing=0.08 * k)
 
     lead_cx = rail_x + rail_w * scale.value / scale.max_value
     draw_car_glyph(lead_cx - car_w / 2, car_y, car_w, rgba(zone_rgb, alpha))
@@ -109,7 +99,7 @@ class FollowStrip:
     speed_unit = tr("km/h") if is_metric else tr("mph")
     delta = speed_delta(reading.v_rel, is_metric)
     direction = int(np.sign(delta))
-    big, small = 2.3 * k, 1.3 * k
+    big, small = 2.3 * k, max(TEXT_MIN, 1.3 * k)
     speed_sz = measure_text_cached(self._font_bold, speed, int(big))
     unit_text = f"{speed_unit}"
     unit_sz = measure_text_cached(self._font_semi_bold, unit_text, int(small))
@@ -129,8 +119,8 @@ class FollowStrip:
     draw_text(self._font_semi_bold, delta_text, small, lx, small_y, muted)
 
   def _draw_ttc_chip(self, right: float, strip_top: float, k: float, reading: LeadGapReading, zone_rgb, alpha: float) -> None:
-    text = tr("CLOSING • TTC {:.1f} S").format(reading.ttc)
-    size = 1.4 * k
+    text = tr("CLOSING • TTC {:.1f}s").format(reading.ttc)
+    size = max(TEXT_MIN, 1.4 * k)
     sz = measure_text_cached(self._font_bold, text, int(size), 0.08 * k)
     pad_x, pad_y = 1.0 * k, 0.35 * k
     chip = rl.Rectangle(right - sz.x - 2 * pad_x, strip_top - sz.y / 2 - pad_y, sz.x + 2 * pad_x, sz.y + 2 * pad_y)

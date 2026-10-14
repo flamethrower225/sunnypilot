@@ -11,11 +11,10 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import WHITE, draw_text, draw_triangle, rgba
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import draw_triangle, rgba
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.system.ui.lib.application import FontWeight, gui_app
-from openpilot.system.ui.lib.multilang import tr
+from openpilot.system.ui.lib.application import gui_app
 
 # Lead wake: when the lead car is braking hard, red chevrons on the road show where it is predicted to be 2, 4 and 6 s from
 # now (relative to us), so you see the gap about to close before it does.
@@ -31,7 +30,7 @@ HOLD_TIME = 0.8           # s, the wake stays up this long after the lead stops 
 RED = (232, 54, 60)       # lead chevron red is (201, 34, 49), a little hotter here so it reads on its own
 GLOW = (255, 118, 88)
 PULSE_PERIOD = 1.1        # s
-LABEL_SPACING = 24.0      # px, minimum vertical gap between two time labels
+RIM_WIDTH = 4.0           # px
 
 
 @dataclass(frozen=True)
@@ -95,7 +94,6 @@ class LeadWake:
 
   def __init__(self):
     dt = 1 / gui_app.target_fps
-    self._font = gui_app.font(FontWeight.SEMI_BOLD)
     self._hold = HoldTimer(HOLD_TIME, dt)
     self._alpha = FirstOrderFilter(0.0, 0.15, dt)
     self._points: list[WakePoint] = []
@@ -141,21 +139,18 @@ class LeadWake:
     alpha = self._alpha.x
     now = rl.get_time()
 
-    # farthest first so nearer chevrons overlap the ones behind them
-    label_ys: list[float] = []
+    # farthest first so nearer chevrons overlap the ones behind them. No time labels: the chevrons fade with time, which reads
+    # at a glance where "2 s" would not
     for i, pt in sorted(enumerate(self._points), key=lambda ip: -ip[1].x):
       p = projector.to_screen(pt.x, pt.y, 0.0)
       if p is None:
         continue
       reveal = float(np.clip(alpha * 1.8 - i * 0.35, 0.0, 1.0))  # chevrons come in one after the other, nearest the lead first
       pulse = 0.78 + 0.22 * math.sin(now * 2 * math.pi / PULSE_PERIOD - i * 1.1)
-      # chevrons that are close on screen would stack their time labels, so only the farthest of them gets one
-      show_label = all(abs(p[1] - y) > LABEL_SPACING for y in label_ys)
-      if show_label:
-        label_ys.append(p[1])
-      self._draw_chevron(rect, pt, p, float(np.interp(pt.t, WAKE_TIMES, WAKE_ALPHA)) * pulse * reveal, show_label)
+      self._draw_chevron(rect, pt, p, float(np.interp(pt.t, WAKE_TIMES, WAKE_ALPHA)) * pulse * reveal)
 
-  def _draw_chevron(self, rect: rl.Rectangle, pt: WakePoint, screen: tuple[float, float], opacity: float, show_label: bool) -> None:
+  @staticmethod
+  def _draw_chevron(rect: rl.Rectangle, pt: WakePoint, screen: tuple[float, float], opacity: float) -> None:
     """Same shape and scaling as the lead chevron in ModelRenderer._update_lead_vehicle: apex at the road point, base toward us."""
     if opacity < 0.01:
       return
@@ -169,7 +164,4 @@ class LeadWake:
     draw_triangle(glow[0], glow[1], glow[2], rgba(GLOW, 0.35 * opacity))
     draw_triangle(chevron[0], chevron[1], chevron[2], rgba(RED, opacity))
     for a, b in zip(chevron, chevron[1:] + chevron[:1], strict=True):  # a light rim keeps it apart from the path underneath
-      rl.draw_line_ex(rl.Vector2(*a), rl.Vector2(*b), 2.0, rgba((255, 214, 208), 0.7 * opacity))
-
-    if show_label:
-      draw_text(self._font, tr("{} s").format(int(pt.t)), 21.0, x + sz * 1.25 + 10.0, y + sz * 0.45, rgba(WHITE, 0.85 * opacity))
+      rl.draw_line_ex(rl.Vector2(*a), rl.Vector2(*b), RIM_WIDTH, rgba((255, 214, 208), 0.7 * opacity))

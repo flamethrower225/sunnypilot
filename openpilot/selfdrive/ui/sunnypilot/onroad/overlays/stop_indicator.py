@@ -11,10 +11,11 @@ import pyray as rl
 
 from openpilot.cereal import custom
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE, ZONE_RGB, rgba, draw_text, draw_text_centered, \
-  draw_triangle, draw_value_with_unit, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, TEXT_MIN, WHITE, ZONE_RGB, rgba, draw_text, \
+  draw_text_centered, draw_triangle, draw_value_with_unit, measure_value_with_unit, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import FT_PER_M, GapZone
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import DetectionEvent, EventKind, StopPhase, get_detection_feed
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.threat_board import board_rect
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr, tr_noop
@@ -33,21 +34,33 @@ X_FROM_CENTER = 240
 TOP = 40
 MAX_WIDTH = 420
 WHEEL_CLEARANCE = 270
-THREAT_BOARD_CLEARANCE = 450
+THREAT_BOARD_GAP = 20
 PAD = 22
 ICON_R = 34
 PULSE_TIME = 0.8  # s
 
+BIG_SIZE = 76
+LINE_SIZE = TEXT_MIN
+LINE_GAP = 6
+
 LOG_GAP = 14
-LOG_ROW_H = 42
-LOG_SHOW = 60.0   # s an event stays in the log
-LOG_FRESH = 1.2   # s a new row stays highlighted
+LOG_PAD = 16
+LOG_SHOW = 60.0          # s an event stays in the log while stopped
+LOG_SHOW_MOVING = 8.0    # s the newest event stays up while driving
+LOG_FRESH = 1.2          # s a new event stays highlighted
+LOG_ROWS_STOPPED = 3
+LOG_LABEL_MOVING = 48    # px, the one event shown while driving is as large as an alert
+LOG_DOT = 10.0           # px radius
+STOPPED_SPEED = 0.5      # m/s, below this the log shows its full list
 
 
 def column(rect: rl.Rectangle) -> tuple[float, float]:
   """x and width of the column the card and the log share."""
   x = rect.x + rect.width / 2 + X_FROM_CENTER
-  right = rect.x + rect.width - (THREAT_BOARD_CLEARANCE if ui_state.threat_board else WHEEL_CLEARANCE)
+  if ui_state.threat_board:
+    right = board_rect(rect, ui_state.developer_ui, 0.0).x - THREAT_BOARD_GAP
+  else:
+    right = rect.x + rect.width - WHEEL_CLEARANCE
   return x, max(260.0, min(MAX_WIDTH, right - x))
 
 
@@ -88,31 +101,26 @@ class StopCard:
       self._distance = stop.stop_x  # already smoothed by the detector; the stop line shows the same number
     self._alpha.update(1.0 if stop.phase != StopPhase.IDLE else 0.0)
 
-  def _lines(self, now: float) -> list[tuple[str, tuple]]:
-    """(text, color) lines under the big number."""
+  def _lines(self) -> list[tuple[str, tuple]]:
+    """(text, color) lines under the big number: a few words each, the reason first, then anything you have to do."""
     stop = get_detection_feed().stop
     sm = ui_state.sm
     lines: list[tuple[str, tuple]] = []
     if self._phase in (StopPhase.APPROACH, StopPhase.STOPPED):
-      if stop.car_ahead:
-        lines.append((tr("Car ahead"), WHITE))
-      else:
-        lines.append((tr("No car ahead"), WHITE))
-        lines.append((tr("Likely a light or sign"), MUTED_RGB))
+      lines.append((tr("Car ahead") if stop.car_ahead else tr("Light or sign"), WHITE))
     elif self._phase == StopPhase.GO:
-      lines.append((tr("Traffic is moving") if stop.car_ahead else tr("Model wants to go"), WHITE))
-    elif self._phase == StopPhase.CLEARED:
-      lines.append((tr("No longer planning a stop"), WHITE))
-
-    if stop.onset is not None and self._phase in (StopPhase.APPROACH, StopPhase.STOPPED):
-      value, unit = format_distance(stop.onset.distance or 0.0, ui_state.is_metric)
-      lines.append((tr("Seen {:.1f}s ago, {} {} out").format(now - stop.onset.mono_time, value, unit), MUTED_RGB))
+      lines.append((tr("Lead moving") if stop.car_ahead else tr("Model says go"), WHITE))
 
     if self._phase == StopPhase.APPROACH and not stop.car_ahead:
       if not sm['carControl'].longActive:
-        lines.append((tr("Not controlling speed"), WARN_RGB))
+        lines.append((tr("You must brake"), WARN_RGB))
       elif not planner_follows_model(sm):
-        lines.append((tr("Chill mode won't stop"), WARN_RGB))
+        lines.append((tr("Chill: you brake"), WARN_RGB))
+
+    # a fixed number, not a running timer, so it doesn't pull the eye
+    if stop.onset is not None and self._phase == StopPhase.APPROACH:
+      value, unit = format_distance(stop.onset.distance or 0.0, ui_state.is_metric)
+      lines.append((tr("Seen {} {} out").format(value, unit), MUTED_RGB))
     return lines
 
   def render(self, rect: rl.Rectangle) -> None:
@@ -139,9 +147,22 @@ class StopCard:
       waited = int(now - stop.phase_since)
       big = (f"{waited // 60}:{waited % 60:02d}", "")
 
-    line_size, line_gap = 27, 5
-    wrapped = [(line, rgb) for text, rgb in self._lines(now) for line in wrap_text(self._font_semi, text, line_size, int(w - 2 * PAD))]
-    head_h = max(2 * ICON_R, 44 + (78 if big else 0))
+    line_size, line_gap = LINE_SIZE, LINE_GAP
+    wrapped = [(line, rgb) for text, rgb in self._lines() for line in wrap_text(self._font_semi, text, line_size, int(w - 2 * PAD))]
+    big_h = measure_value_with_unit(self._font_bold, big[0], BIG_SIZE, self._font_semi, big[1], TEXT_MIN, gap=8).y if big else 0.0
+
+    # the title goes beside the icon, or on its own row when the column is too narrow for it
+    title_w = measure_text_cached(self._font_bold, title, TEXT_MIN, 1.5).x
+    if text_x + title_w <= x + w - PAD:
+      title_pos = (text_x, y + PAD)
+      head_h = max(2 * ICON_R, TEXT_MIN + 8 + big_h * 0.9)
+      icon_y, big_y = y + PAD + ICON_R, y + PAD + TEXT_MIN + 4
+    else:
+      title_pos = (x + PAD, y + PAD)
+      row_h = max(2 * ICON_R, big_h * 0.9)
+      head_h = TEXT_MIN + 12 + row_h
+      icon_y = y + PAD + TEXT_MIN + 12 + row_h / 2
+      big_y = icon_y - big_h / 2
     h = PAD + head_h + (12 + len(wrapped) * (line_size + line_gap) if wrapped else 0) + PAD
 
     # a red flash on the border marks the exact moment a stop was first seen
@@ -152,14 +173,14 @@ class StopCard:
     rl.draw_rectangle_rounded(card, roundness(24, w, h), 12, rgba(BLACK, 0.62 * alpha))
     rl.draw_rectangle_rounded_lines_ex(card, roundness(24, w, h), 12, 3 + 5 * pulse, rgba(color, (0.45 + 0.55 * pulse) * alpha))
 
-    icon = rl.Vector2(x + PAD + ICON_R, y + PAD + ICON_R)
+    icon = rl.Vector2(x + PAD + ICON_R, icon_y)
     if pulse > 0:
       rl.draw_ring(icon, ICON_R + 4 + (1 - pulse) * 40, ICON_R + 10 + (1 - pulse) * 40, 0, 360, 48, rgba(color, 0.6 * pulse * alpha))
     self._draw_icon(icon, color, alpha)
 
-    draw_text(self._font_bold, title, 36, text_x, y + PAD, rgba(color, alpha), spacing=1.5)
+    draw_text(self._font_bold, title, TEXT_MIN, title_pos[0], title_pos[1], rgba(color, alpha), spacing=1.5)
     if big is not None:
-      draw_value_with_unit(self._font_bold, big[0], 76, self._font_semi, big[1], 30, text_x, y + PAD + 40, rgba(WHITE, alpha),
+      draw_value_with_unit(self._font_bold, big[0], BIG_SIZE, self._font_semi, big[1], TEXT_MIN, text_x, big_y, rgba(WHITE, alpha),
                            rgba(WHITE, 0.7 * alpha), gap=8)
 
     ly = y + PAD + head_h + 12
@@ -220,8 +241,13 @@ def clock(wall: float) -> str:
   return f"{t:%H:%M:%S}.{t.microsecond // 100000}"
 
 
+def is_stopped(sm) -> bool:
+  return sm['carState'].vEgo < STOPPED_SPEED
+
+
 class DetectionLogPanel:
-  """Timestamped list of what the model and planner picked up, newest first."""
+  """What the model and planner picked up. While driving only the newest event shows, large, for a few seconds; once
+  stopped the last few come back with their timestamps, when there is time to read them."""
 
   def __init__(self):
     self._font_bold = gui_app.font(FontWeight.BOLD)
@@ -234,8 +260,8 @@ class DetectionLogPanel:
       self._alpha.x = 0.0
       return
     update_feed()
-    recent = time.monotonic() - get_detection_feed().last_event_mono < LOG_SHOW
-    self._alpha.update(1.0 if recent else 0.0)
+    show = LOG_SHOW if is_stopped(ui_state.sm) else LOG_SHOW_MOVING
+    self._alpha.update(1.0 if time.monotonic() - get_detection_feed().last_event_mono < show else 0.0)
 
   def render(self, rect: rl.Rectangle) -> None:
     alpha = self._alpha.x
@@ -251,29 +277,64 @@ class DetectionLogPanel:
     if not self._top.initialized or target > self._top.x:
       self._top.x, self._top.initialized = target, True  # get out from under the card at once, ease back up
     y = self._top.update(target)
-    h = 50 + len(events) * LOG_ROW_H + 10
-    panel = rl.Rectangle(x, y, w, h)
-    rl.draw_rectangle_rounded(panel, roundness(20, w, h), 12, rgba(BLACK, 0.55 * alpha))
-    draw_text(self._font_bold, tr("DETECTIONS"), 20, x + 16, y + 14, rgba(WHITE, 0.6 * alpha), spacing=2)
+    if is_stopped(ui_state.sm):
+      self._draw_list(x, y, w, events[:LOG_ROWS_STOPPED], now, alpha)
+    else:
+      self._draw_latest(x, y, w, events[0], now, alpha)
 
-    ry = y + 50
+  def _fit_detail(self, detail: str, room: float) -> str:
+    """Drops trailing parts of the detail until it fits."""
+    while detail and measure_text_cached(self._font_semi, detail, LINE_SIZE).x > room:
+      detail = detail.rsplit(" • ", 1)[0] if " • " in detail else ""
+    return detail
+
+  def _draw_latest(self, x: float, y: float, w: float, event: DetectionEvent, now: float, alpha: float) -> None:
+    label, rgb = EVENT_STYLE[event.kind]
+    detail = self._fit_detail(event_detail(event, ui_state.is_metric), w - 2 * LOG_PAD)
+    h = LOG_PAD + LOG_LABEL_MOVING + (LINE_GAP + LINE_SIZE if detail else 0) + LOG_PAD
+    panel = rl.Rectangle(x, y, w, h)
+    fresh = max(0.0, 1.0 - (now - event.mono_time) / LOG_FRESH)
+    rl.draw_rectangle_rounded(panel, roundness(20, w, h), 12, rgba(BLACK, 0.6 * alpha))
+    rl.draw_rectangle_rounded(panel, roundness(20, w, h), 12, rgba(rgb, 0.3 * fresh * alpha))
+    rl.draw_rectangle_rounded_lines_ex(panel, roundness(20, w, h), 12, 3, rgba(rgb, 0.6 * alpha))
+
+    cy = y + LOG_PAD + LOG_LABEL_MOVING / 2
+    rl.draw_circle_v(rl.Vector2(x + LOG_PAD + LOG_DOT, cy), LOG_DOT, rgba(rgb, alpha))
+    # as large as the column allows, never below the text floor
+    label_x = x + LOG_PAD + 2 * LOG_DOT + 14
+    size = LOG_LABEL_MOVING
+    while size > TEXT_MIN and measure_text_cached(self._font_bold, tr(label), size).x > x + w - LOG_PAD - label_x:
+      size -= 2
+    label_sz = measure_text_cached(self._font_bold, tr(label), size)
+    draw_text(self._font_bold, tr(label), size, label_x, cy - label_sz.y / 2, rgba(rgb, alpha))
+    if detail:
+      draw_text(self._font_semi, detail, LINE_SIZE, x + LOG_PAD, y + LOG_PAD + LOG_LABEL_MOVING + LINE_GAP, rgba(WHITE, 0.85 * alpha))
+
+  def _draw_list(self, x: float, y: float, w: float, events: list[DetectionEvent], now: float, alpha: float) -> None:
+    rows = []
     for event in events:
+      label, rgb = EVENT_STYLE[event.kind]
+      rows.append((event, tr(label), rgb, self._fit_detail(event_detail(event, ui_state.is_metric), w - 2 * LOG_PAD - 2 * LOG_DOT - 14)))
+    row_h = [LINE_SIZE + 8 + (LINE_SIZE + 4 if detail else 0) + 10 for *_, detail in rows]
+    h = LOG_PAD + sum(row_h) + LOG_PAD - 10
+    panel = rl.Rectangle(x, y, w, h)
+    rl.draw_rectangle_rounded(panel, roundness(20, w, h), 12, rgba(BLACK, 0.6 * alpha))
+
+    ry = y + LOG_PAD
+    for (event, label, rgb, detail), rh in zip(rows, row_h, strict=True):
       age = now - event.mono_time
       row_alpha = alpha * (1.0 if age < 10 else max(0.35, 1.0 - (age - 10) / (LOG_SHOW - 10)))
-      label, rgb = EVENT_STYLE[event.kind]
       if age < LOG_FRESH:
-        fresh = 1.0 - age / LOG_FRESH
-        rl.draw_rectangle_rounded(rl.Rectangle(x + 8, ry - 3, w - 16, LOG_ROW_H - 2), 0.4, 8, rgba(rgb, 0.25 * fresh * alpha))
-      tx = x + 16
-      tx += draw_text(self._font_semi, clock(event.wall_time), 21, tx, ry + 5, rgba(WHITE, 0.55 * row_alpha)).x + 12
-      rl.draw_circle_v(rl.Vector2(tx + 7, ry + 18), 7, rgba(rgb, row_alpha))
-      tx += 22
-      tx += draw_text(self._font_bold, tr(label), 23, tx, ry + 3, rgba(rgb, row_alpha)).x + 10
-      detail = event_detail(event, ui_state.is_metric)
-      room = x + w - 16 - tx
-      while detail and measure_text_cached(self._font_semi, detail, 21).x > room:
-        detail = detail.rsplit(" • ", 1)[0] if " • " in detail else ""
+        rl.draw_rectangle_rounded(rl.Rectangle(x + 8, ry - 4, w - 16, rh - 2), 0.3, 8, rgba(rgb, 0.25 * (1.0 - age / LOG_FRESH) * alpha))
+      rl.draw_circle_v(rl.Vector2(x + LOG_PAD + LOG_DOT, ry + LINE_SIZE / 2 + 2), LOG_DOT, rgba(rgb, row_alpha))
+      tx = x + LOG_PAD + 2 * LOG_DOT + 14
+      label_w = draw_text(self._font_bold, label, LINE_SIZE, tx, ry, rgba(rgb, row_alpha)).x
+      # the time it happened, right aligned, shortened or left out when the label leaves no room
+      room = x + w - LOG_PAD - (tx + label_w + 12)
+      stamp = next((c for c in (clock(event.wall_time), clock(event.wall_time)[:-2]) if measure_text_cached(self._font_semi, c, LINE_SIZE).x <= room), "")
+      if stamp:
+        sw = measure_text_cached(self._font_semi, stamp, LINE_SIZE).x
+        draw_text(self._font_semi, stamp, LINE_SIZE, x + w - LOG_PAD - sw, ry, rgba(WHITE, 0.6 * row_alpha))
       if detail:
-        dw = measure_text_cached(self._font_semi, detail, 21).x
-        draw_text(self._font_semi, detail, 21, x + w - 16 - dw, ry + 5, rgba(WHITE, 0.8 * row_alpha))
-      ry += LOG_ROW_H
+        draw_text(self._font_semi, detail, LINE_SIZE, tx, ry + LINE_SIZE + 4, rgba(WHITE, 0.8 * row_alpha))
+      ry += rh

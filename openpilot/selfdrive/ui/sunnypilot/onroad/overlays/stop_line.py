@@ -26,6 +26,9 @@ MIN_X = 3.0         # m, closer than this the line is under the hood
 LOCK_ON = 0.6       # s the line sweeps in from farther out when a stop is first seen
 LOCK_ON_FROM = 18.0  # m
 LABEL_HEIGHT = 1.4  # m above the road
+LABEL_SIZE = 44     # px, the distance is the part you read, so it is as large as the alert text
+EDGE_WIDTH = 5.0    # px
+STEM_WIDTH = 4.0    # px
 
 
 def quad(projector: RoadProjector, x: float, y_c: float, heading: float, half_len: float, half_w: float):
@@ -91,23 +94,23 @@ class StopLine:
     fill_quad(glow, rgba(STOP_RGB, (0.18 + 0.12 * pulse) * alpha))
     fill_quad(bar, rgba(STOP_RGB, 0.9 * alpha * (0.5 + 0.5 * lock)))
     for a, b in ((bar[0], bar[3]), (bar[1], bar[2])):
-      rl.draw_line_ex(rl.Vector2(*a), rl.Vector2(*b), 3, rgba(WHITE, 0.85 * alpha))
+      rl.draw_line_ex(rl.Vector2(*a), rl.Vector2(*b), EDGE_WIDTH, rgba(WHITE, 0.85 * alpha))
 
     anchor = projector.to_screen(x_draw, y_c, LABEL_HEIGHT)
     if anchor is None:
       return
     value, unit = format_distance(x, ui_state.is_metric)
     text = tr("STOP {} {}").format(value, unit)
-    size = 30
+    size = LABEL_SIZE
     sz = measure_text_cached(self._font, text, size, 1)
-    w, h = sz.x + 28, sz.y + 12
+    w, h = sz.x + 36, sz.y + 14
     px = float(min(max(anchor[0] - w / 2, rect.x + 10), rect.x + rect.width - 10 - w))
     py = float(max(anchor[1] - h, rect.y + 10))
     pill = rl.Rectangle(px, py, w, h)
     rl.draw_rectangle_rounded(pill, roundness(h / 2, w, h), 12, rgba(BLACK, 0.7 * alpha))
-    rl.draw_rectangle_rounded_lines_ex(pill, roundness(h / 2, w, h), 12, 2, rgba(STOP_RGB, alpha))
-    draw_text(self._font, text, size, px + 14, py + 6, rgba(WHITE, alpha), spacing=1)
+    rl.draw_rectangle_rounded_lines_ex(pill, roundness(h / 2, w, h), 12, 4, rgba(STOP_RGB, alpha))
+    draw_text(self._font, text, size, px + 18, py + 7, rgba(WHITE, alpha), spacing=1)
     # a short stem from the pill to the line
     base = projector.to_screen(x_draw, y_c)
     if base is not None and base[1] > py + h:
-      rl.draw_line_ex(rl.Vector2(base[0], base[1]), rl.Vector2(anchor[0], py + h), 2, rgba(STOP_RGB, 0.8 * alpha))
+      rl.draw_line_ex(rl.Vector2(base[0], base[1]), rl.Vector2(anchor[0], py + h), STEM_WIDTH, rgba(STOP_RGB, 0.8 * alpha))

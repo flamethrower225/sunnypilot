@@ -134,8 +134,9 @@ class VisualsLayout(Widget):
       ),
       "DetectionLog": (
         lambda: tr("Detection Log"),
-        tr("List what the model and planner pick up, with the time each was first seen: planned stops, go, new leads, " +
-           "cut-ins, curves and predicted hard braking."),
+        tr("Show what the model and planner pick up: planned stops, go, new leads, cut-ins, curves and predicted hard " +
+           "braking. While driving only the newest shows, for a few seconds. When stopped, the last few are listed with " +
+           "the time each was first seen."),
       ),
       "LeadGapHistory": (
         lambda: tr("Gap History"),

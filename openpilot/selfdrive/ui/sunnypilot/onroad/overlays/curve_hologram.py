@@ -11,8 +11,8 @@ import pyray as rl
 
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import INK, WHITE, ZONE_RGB, draw_triangle, draw_value_with_unit, \
-  measure_value_with_unit, rgba
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import INK, STROKE_MIN, TEXT_MIN, WHITE, ZONE_RGB, draw_triangle, \
+  draw_value_with_unit, measure_value_with_unit, rgba
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -44,6 +44,10 @@ RAIL_ALPHA = (0.8, 0.95, 0.8, 0.3)
 LOOKAHEAD_TINT = 0.65     # a rail point is colored at least this fraction of the worst lateral acceleration still ahead of it
 RAIL_SAMPLES = 40
 GRADIENT_STOPS = 16       # shader limit is 20
+
+# the gate's speed label keeps one size at every distance, so it reads at a glance even while the gate is far away
+LABEL_NUM_SIZE, LABEL_UNIT_SIZE = 56.0, float(TEXT_MIN)
+GATE_LINE = (float(STROKE_MIN), 13.0)   # px post and bar thickness range
 
 # lateral acceleration (m/s²) -> color: green below 1.3, yellow 1.3-1.6, orange at 2.0, red from 2.4
 LAT_ACC_BREAKPOINTS = (1.25, 1.35, 1.6, 1.8, 2.0, 2.4)
@@ -298,7 +302,7 @@ class CurveHologram:
           continue
         x_head, head = pts[0]
         rgb = lat_acc_color(float(np.interp(x_head, self._xs, self._severity)))
-        r = float(np.clip(95.0 / x_head, 1.8, 6.5))
+        r = float(np.clip(140.0 / x_head, 4.0, 9.0))
         for j in range(len(pts) - 1):
           fade = alpha * envelope * (1.0 - (j + 1) / BEAD_TAIL)
           _line(pts[j][1], pts[j + 1][1], r * 1.5 * (1.0 - j / BEAD_TAIL), rgba(WHITE, 0.8 * fade))
@@ -323,7 +327,7 @@ class CurveHologram:
 
     rgb = lat_acc_color(self._apex_lat)
     px_per_m = math.hypot(brx - blx, bry - bly) / (2 * GATE_HALF_WIDTH)
-    th = float(np.clip(0.09 * px_per_m, 2.5, 9.0))
+    th = float(np.clip(0.1 * px_per_m, *GATE_LINE))
     pulse = 0.85 + 0.15 * math.sin(rl.get_time() * 2 * math.pi / 1.4)
 
     # glassy curtain between the posts, clear at the road and brightest at the bar
@@ -350,29 +354,28 @@ class CurveHologram:
       rl.draw_circle_v(rl.Vector2(*p), th * 2.4, rgba(rgb, 0.3 * alpha * pulse))
       rl.draw_circle_v(rl.Vector2(*p), th * 1.1, rgba(WHITE, alpha))
 
-    scale = float(np.clip(0.55 + px_per_m / 80.0, 0.8, 1.3))
-    self._draw_label(rect, (tl[0] + tr[0]) / 2, min(tl[1], tr[1]) - th * 1.5, scale, rgb, alpha, pulse)
+    self._draw_label(rect, (tl[0] + tr[0]) / 2, min(tl[1], tr[1]) - th * 1.5, rgb, alpha, pulse)
 
-  def _draw_label(self, rect: rl.Rectangle, cx: float, bottom: float, scale: float, rgb, alpha: float, pulse: float) -> None:
+  def _draw_label(self, rect: rl.Rectangle, cx: float, bottom: float, rgb, alpha: float, pulse: float) -> None:
     speed = str(self._speed)
     unit = tr("km/h") if self._is_metric else tr("mph")
-    num_size, unit_size = 34.0 * scale, 15.0 * scale
-    arrow_w, arrow_h = 15.0 * scale, 24.0 * scale
-    pad_x, pad_y, gap, stem = 14.0 * scale, 6.0 * scale, 10.0 * scale, 10.0 * scale
+    num_size, unit_size = LABEL_NUM_SIZE, LABEL_UNIT_SIZE
+    arrow_w, arrow_h = 24.0, 38.0
+    pad_x, pad_y, gap, stem = 20.0, 8.0, 14.0, 14.0
 
-    text_sz = measure_value_with_unit(self._font_bold, speed, num_size, self._font_semi_bold, unit, unit_size, gap=4.0 * scale)
+    text_sz = measure_value_with_unit(self._font_bold, speed, num_size, self._font_semi_bold, unit, unit_size, gap=6.0)
     w = pad_x * 2 + arrow_w + gap + text_sz.x
     h = text_sz.y * 0.92 + pad_y * 2
     x = float(np.clip(cx - w / 2, rect.x + 10, rect.x + rect.width - 10 - w))
     y = max(bottom - stem - h, rect.y + 10)
 
-    _line((cx, y + h), (cx, bottom), 2.5 * scale, rgba(rgb, 0.9 * alpha))
+    _line((cx, y + h), (cx, bottom), 5.0, rgba(rgb, 0.9 * alpha))
     radius = h / 2
     roundness = min(1.0, 2 * radius / min(w, h))
     pill = rl.Rectangle(x, y, w, h)
     rl.draw_rectangle_rounded(rl.Rectangle(x + 2, y + 4, w, h), roundness, 14, rgba((0, 0, 0), 0.3 * alpha))
     rl.draw_rectangle_rounded(pill, roundness, 14, rgba(INK, 0.82 * alpha))
-    rl.draw_rectangle_rounded_lines_ex(pill, roundness, 14, 3.0 * scale, rgba(rgb, (0.8 + 0.2 * pulse) * alpha))
+    rl.draw_rectangle_rounded_lines_ex(pill, roundness, 14, 5.0, rgba(rgb, (0.8 + 0.2 * pulse) * alpha))
 
     ax = x + pad_x
     cy = y + h / 2
@@ -381,4 +384,4 @@ class CurveHologram:
     else:
       draw_triangle((ax + arrow_w, cy - arrow_h / 2), (ax, cy), (ax + arrow_w, cy + arrow_h / 2), rgba(rgb, alpha))
     draw_value_with_unit(self._font_bold, speed, num_size, self._font_semi_bold, unit, unit_size, ax + arrow_w + gap, y + pad_y * 0.9,
-                         rgba(WHITE, alpha), rgba(WHITE, 0.7 * alpha), gap=4.0 * scale)
+                         rgba(WHITE, alpha), rgba(WHITE, 0.7 * alpha), gap=6.0)

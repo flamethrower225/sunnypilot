@@ -10,9 +10,10 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, WHITE, rgba, zone_label, delta_label, \
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, TEXT_MIN, WHITE, rgba, zone_label, \
   draw_text, draw_value_with_unit, measure_value_with_unit, draw_delta_arrow, roundness
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, LeadGapReading, primary_value, speed_value
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, LeadGapReading, primary_value, speed_value, \
+  speed_delta
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -57,7 +58,9 @@ class LeadLock:
     h = max(bottom - top, MIN_BOX_H)
     return np.array([cx - w / 2, bottom - h, cx + w / 2, bottom])
 
-  def render(self, rect: rl.Rectangle, reading: LeadGapReading, zone_rgb: np.ndarray, alpha: float, is_metric: bool) -> None:
+  def render(self, rect: rl.Rectangle, reading: LeadGapReading, zone_rgb: np.ndarray, alpha: float, is_metric: bool,
+             bottom_reserve: float = 0.0) -> None:
+    """bottom_reserve is room at the bottom of the screen the tag must stay out of (the gap history graph)."""
     if not self._box_filter.initialized:
       return
 
@@ -69,7 +72,7 @@ class LeadLock:
       top, bottom = cy - (cy - top) * scale, cy + (bottom - cy) * scale
 
     self._draw_brackets(left, top, right, bottom, zone_rgb, alpha)
-    self._draw_tag(rect, (left + right) / 2, bottom, reading, zone_rgb, alpha, is_metric)
+    self._draw_tag(rect, (left + right) / 2, bottom, reading, zone_rgb, alpha, is_metric, bottom_reserve)
 
   @staticmethod
   def _draw_brackets(left: float, top: float, right: float, bottom: float, zone_rgb, alpha: float) -> None:
@@ -89,9 +92,9 @@ class LeadLock:
         rl.draw_circle_v(corner, thickness / 2, color)
 
   def _draw_tag(self, rect: rl.Rectangle, cx: float, box_bottom: float, reading: LeadGapReading, zone_rgb, alpha: float,
-                is_metric: bool) -> None:
+                is_metric: bool, bottom_reserve: float) -> None:
     value, unit = primary_value(reading, is_metric)
-    gap_num, gap_unit, gap_label = 6.2 * K, 2.6 * K, 1.1 * K
+    gap_num, gap_unit, gap_label = 6.2 * K, 2.6 * K, TEXT_MIN
     if reading.show_ttc:
       label = tr("CLOSING")
     else:
@@ -102,12 +105,14 @@ class LeadLock:
 
     speed = str(speed_value(reading.v_lead, is_metric))
     speed_unit = tr("km/h") if is_metric else tr("mph")
-    spd_num, spd_unit, spd_detail = 3.6 * K, 1.4 * K, 1.3 * K
+    spd_num, spd_unit, spd_detail = 3.6 * K, TEXT_MIN, TEXT_MIN
     spd_sz = measure_value_with_unit(self._font_bold, speed, spd_num, self._font_semi_bold, speed_unit, spd_unit, gap=0.3 * K)
     if reading.show_ttc:
-      direction, detail = 0, tr("TTC {:.1f} s").format(reading.ttc)
+      direction, detail = 0, tr("TTC {:.1f}s").format(reading.ttc)
     else:
-      direction, detail = delta_label(reading, is_metric)
+      # speed difference as an arrow and a number, no words
+      delta = speed_delta(reading.v_rel, is_metric)
+      direction, detail = int(np.sign(delta)), (str(abs(delta)) if delta else "=")
     detail_sz = measure_text_cached(self._font_bold, detail, int(spd_detail))
     arrow = spd_detail * 0.7 if direction else 0.0
     detail_w = detail_sz.x + (arrow + 0.25 * K if arrow else 0.0)
@@ -117,7 +122,7 @@ class LeadLock:
     tag_h = gap_sz.y * 0.92 + label_sz.y + 1.1 * K
 
     x = float(np.clip(cx - tag_w / 2, rect.x + MARGIN, rect.x + rect.width - MARGIN - tag_w))
-    y = min(box_bottom + STEM, rect.y + rect.height - MARGIN - tag_h)
+    y = min(box_bottom + STEM, rect.y + rect.height - max(MARGIN, bottom_reserve) - tag_h)
 
     if y > box_bottom:
       rl.draw_line_ex(rl.Vector2(cx, box_bottom), rl.Vector2(cx, y), 0.3 * K, rgba(zone_rgb, alpha))

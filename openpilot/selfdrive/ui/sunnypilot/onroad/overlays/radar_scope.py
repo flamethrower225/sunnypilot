@@ -15,21 +15,19 @@ import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import get_bottom_dev_ui_offset
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, WHITE, ZONE_RGB, rgba, draw_text, \
-  draw_triangle, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, DOT_MIN, INK, WHITE, ZONE_RGB, rgba, draw_triangle, \
+  roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, FT_PER_M
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import CLASS_RGB, RadarFeed, RadarTrack, TrackClass, display_zone
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.system.ui.lib.application import gui_app, FontWeight
-from openpilot.system.ui.lib.multilang import tr
-from openpilot.system.ui.lib.text_measure import measure_text_cached
+from openpilot.system.ui.lib.application import gui_app
 
-PANEL_W, PANEL_H = 400.0, 460.0
+PANEL_W, PANEL_H = 400.0, 410.0   # leaves room under it for the driver flag chips above the driver monitoring icon
 PANEL_X, PANEL_Y = 40.0, 290.0     # from the HUD rect, clear of the MAX box and speed limit sign above
 ROCKET_FUEL_SHIFT = 40.0           # the rocket fuel bar takes the left edge
 PAD = 16.0
-HEADER_H = 48.0
-EGO_W, EGO_H = 27.0, 52.0
+TOP_PAD = 20.0
+EGO_W, EGO_H = 30.0, 56.0
 BOTTOM_PAD = 16.0
 
 MAX_RANGE = 120.0                  # m at the top of the plot
@@ -39,10 +37,19 @@ RINGS_IMPERIAL = (100.0, 200.0, 300.0)   # ft
 LANE_SAMPLES = 30
 LANE_DISTANCES = np.linspace(0.0, 1.0, LANE_SAMPLES) ** 2 * MAX_RANGE   # even steps on the compressed range axis
 
-VELOCITY_TICK = 5.0                # px per m/s of closing or opening speed
-MAX_TICK = 34.0
+VELOCITY_TICK = 6.0                # px per m/s of closing or opening speed
+MAX_TICK = 44.0
 MIN_TICK_SPEED = 0.5               # m/s
 PING_PERIOD = 3.6                  # s
+
+# sized to read at a glance: no text at all, the dots and lines are thick enough to see from the corner of an eye
+DOT_STATIONARY = float(DOT_MIN)
+DOT_MOVING = 12.0
+DOT_THREAT = 15.0
+LANE_WIDTH_OURS, LANE_WIDTH_OTHER = 7.0, 4.5
+RING_WIDTH = 3.0
+TICK_WIDTH = 6.0
+LEAD_RING_RADIUS, LEAD_RING_WIDTH = 23.0, 6.0
 
 
 @dataclass(frozen=True)
@@ -75,15 +82,15 @@ def scope_rect(rect: rl.Rectangle, rocket_fuel: bool, bottom_dev_ui: float = 0.0
 
 def scope_frame(panel: rl.Rectangle) -> ScopeFrame:
   origin_y = panel.y + panel.height - BOTTOM_PAD - EGO_H
-  top = panel.y + HEADER_H + 10.0
+  top = panel.y + TOP_PAD
   return ScopeFrame(panel.x + panel.width / 2, origin_y, (panel.width - 2 * PAD) / (2 * MAX_LATERAL), origin_y - top)
 
 
-def ring_ranges(is_metric: bool) -> list[tuple[float, str]]:
-  """(range in m, label) of each range ring."""
+def ring_radii(is_metric: bool) -> list[float]:
+  """Range of each range ring in m, at round numbers in the display unit."""
   if is_metric:
-    return [(r, f"{r:.0f}") for r in RINGS_METRIC]
-  return [(r / FT_PER_M, f"{r:.0f}") for r in RINGS_IMPERIAL]
+    return list(RINGS_METRIC)
+  return [r / FT_PER_M for r in RINGS_IMPERIAL]
 
 
 def ring_points(radius: float, step: float = 1.5) -> list[tuple[float, float]]:
@@ -102,8 +109,6 @@ class RadarScope:
   The lead has a solid ring, the second lead a dashed one, and a tick on each moving dot points the way it's pulling (up is faster than us)."""
 
   def __init__(self):
-    self._font_bold = gui_app.font(FontWeight.BOLD)
-    self._font_semi_bold = gui_app.font(FontWeight.SEMI_BOLD)
     dt = 1 / gui_app.target_fps
     self._feed = RadarFeed(dt)
     self._alpha = FirstOrderFilter(0.0, 0.2, dt)
@@ -153,23 +158,10 @@ class RadarScope:
 
     rl.draw_rectangle_rounded(panel, roundness(22, panel.width, panel.height), 16, rgba(BLACK, 0.62 * alpha))
     rl.draw_rectangle_rounded_lines_ex(panel, roundness(22, panel.width, panel.height), 16, 3, rgba(WHITE, 0.28 * alpha))
-    self._draw_header(panel, alpha)
     self._draw_rings(frame, ui_state.is_metric, now, alpha)
     self._draw_lanes(frame, alpha)
     self._draw_tracks(frame, now, alpha)
     self._draw_ego(frame, alpha)
-
-  def _draw_header(self, panel: rl.Rectangle, alpha: float) -> None:
-    title_y = panel.y + 15
-    draw_text(self._font_bold, tr("RADAR"), 21, panel.x + PAD + 6, title_y, rgba(WHITE, 0.9 * alpha), spacing=2.5)
-
-    count = len(self._feed.tracks)
-    caption = f"{count} " + (tr("TRACK") if count == 1 else tr("TRACKS"))
-    size = measure_text_cached(self._font_semi_bold, caption, 19, 1.0)
-    draw_text(self._font_semi_bold, caption, 19, panel.x + panel.width - PAD - 6 - size.x, title_y + 1, rgba(WHITE, 0.6 * alpha), spacing=1.0)
-
-    line_y = panel.y + HEADER_H
-    rl.draw_line_ex(rl.Vector2(panel.x + PAD, line_y), rl.Vector2(panel.x + panel.width - PAD, line_y), 1.5, rgba(WHITE, 0.14 * alpha))
 
   def _draw_ring(self, frame: ScopeFrame, radius: float, thickness: float, color: rl.Color, dashed: bool = False) -> None:
     pts = [frame.project(d, y) for d, y in ring_points(radius)]
@@ -179,22 +171,13 @@ class RadarScope:
       rl.draw_line_ex(rl.Vector2(*pts[i]), rl.Vector2(*pts[i + 1]), thickness, color)
 
   def _draw_rings(self, frame: ScopeFrame, is_metric: bool, now: float, alpha: float) -> None:
-    rings = ring_ranges(is_metric)
-    for radius, _ in rings:
-      self._draw_ring(frame, radius, 1.6, rgba(WHITE, 0.17 * alpha), dashed=True)
+    for radius in ring_radii(is_metric):
+      self._draw_ring(frame, radius, RING_WIDTH, rgba(WHITE, 0.2 * alpha), dashed=True)
 
     # a faint ping sweeping outward from the bumper
     phase = (now % PING_PERIOD) / PING_PERIOD
     if phase < 0.85:
-      self._draw_ring(frame, phase / 0.85 * MAX_RANGE * 0.98, 2.5, rgba(WHITE, 0.14 * (1 - phase / 0.85) * alpha))
-
-    unit = "m" if is_metric else "ft"
-    for i, (radius, label) in enumerate(rings):
-      d, y = ring_points(radius)[0]
-      x, py = frame.project(d, y)
-      text = f"{label} {unit}" if i == len(rings) - 1 else label
-      size = measure_text_cached(self._font_semi_bold, text, 15)
-      draw_text(self._font_semi_bold, text, 15, x + 2, py - size.y - 1, rgba(WHITE, 0.52 * alpha))
+      self._draw_ring(frame, phase / 0.85 * MAX_RANGE * 0.98, 4.0, rgba(WHITE, 0.14 * (1 - phase / 0.85) * alpha))
 
   def _draw_lanes(self, frame: ScopeFrame, alpha: float) -> None:
     if self._lane_y is None:
@@ -220,7 +203,7 @@ class RadarScope:
     for i in (0, 3, 1, 2):
       bright = i in (1, 2)
       color = rgba(WHITE, (0.85 if bright else 0.3) * self._lane_alpha[i] * alpha)
-      thickness = 3.5 if bright else 2.5
+      thickness = LANE_WIDTH_OURS if bright else LANE_WIDTH_OTHER
       lat = self._lane_y[i]
       for j in range(LANE_SAMPLES - 1):
         if not (np.isfinite(lat[j]) and np.isfinite(lat[j + 1])) or max(abs(lat[j]), abs(lat[j + 1])) > MAX_LATERAL:
@@ -251,24 +234,24 @@ class RadarScope:
     rgb = ZONE_RGB[zone] if zone is not None else CLASS_RGB[t.cls]
     stationary = t.cls == TrackClass.STATIONARY
     a = (0.5 if stationary else 0.95) * alpha
-    radius = 5.0 if stationary else 7.5
+    radius = DOT_STATIONARY if stationary else DOT_MOVING
 
     if zone is not None:
       pulse = 0.5 + 0.5 * math.sin(now * 2 * math.pi / (0.6 if zone == GapZone.CRITICAL else 1.2))
-      rl.draw_circle_v(rl.Vector2(x, y), radius + 4 + 3 * pulse, rgba(rgb, (0.14 + 0.1 * pulse) * alpha))
-      radius = 8.5
+      rl.draw_circle_v(rl.Vector2(x, y), DOT_THREAT + 5 + 4 * pulse, rgba(rgb, (0.16 + 0.1 * pulse) * alpha))
+      radius = DOT_THREAT
 
     if not stationary and abs(t.v_rel) >= MIN_TICK_SPEED:
       # points up when it's pulling away, down when we're gaining on it
-      length = min(max(abs(t.v_rel) * VELOCITY_TICK, 7.0), MAX_TICK)
+      length = min(max(abs(t.v_rel) * VELOCITY_TICK, 10.0), MAX_TICK)
       sign = -1.0 if t.v_rel > 0 else 1.0
       start = y + sign * radius * 0.6
       end = y + sign * (radius + length)
-      rl.draw_line_ex(rl.Vector2(x, start), rl.Vector2(x, end), 3.0, rgba(rgb, 0.75 * alpha))
-      rl.draw_circle_v(rl.Vector2(x, end), 1.9, rgba(rgb, 0.75 * alpha))
+      rl.draw_line_ex(rl.Vector2(x, start), rl.Vector2(x, end), TICK_WIDTH, rgba(rgb, 0.8 * alpha))
+      rl.draw_circle_v(rl.Vector2(x, end), TICK_WIDTH / 2, rgba(rgb, 0.8 * alpha))
 
     if t.cls == TrackClass.ONCOMING and zone is None:
-      rl.draw_ring(rl.Vector2(x, y), radius - 2.8, radius, 0, 360, 24, rgba(rgb, a))
+      rl.draw_ring(rl.Vector2(x, y), radius - 5.0, radius, 0, 360, 24, rgba(rgb, a))
     else:
       rl.draw_circle_v(rl.Vector2(x, y), radius, rgba(rgb, a))
       if not stationary:
@@ -279,22 +262,22 @@ class RadarScope:
     center = rl.Vector2(*frame.project(lead.d_rel, lead.y_right))
     if style == "solid":
       pulse = 0.5 + 0.5 * math.sin(now * 2 * math.pi / 1.6)
-      radius = 14.5 + 1.2 * pulse
-      rl.draw_ring(center, radius - 2.6, radius, 0, 360, 36, rgba(WHITE, alpha))
-      rl.draw_ring(center, radius + 2.5, radius + 6.5, 0, 360, 36, rgba(WHITE, (0.1 + 0.08 * pulse) * alpha))
+      radius = LEAD_RING_RADIUS + 2.0 * pulse
+      rl.draw_ring(center, radius - LEAD_RING_WIDTH, radius, 0, 360, 36, rgba(WHITE, alpha))
+      rl.draw_ring(center, radius + 3.0, radius + 9.0, 0, 360, 36, rgba(WHITE, (0.12 + 0.08 * pulse) * alpha))
     else:
-      radius = 12.5
+      radius = LEAD_RING_RADIUS - 3.0
       for k in range(6):
         start = k * 60.0 + (now * 30.0) % 60.0
-        rl.draw_ring(center, radius - 2.2, radius, start, start + 36.0, 8, rgba(WHITE, 0.85 * alpha))
+        rl.draw_ring(center, radius - LEAD_RING_WIDTH + 1.0, radius, start, start + 36.0, 8, rgba(WHITE, 0.85 * alpha))
 
   def _draw_ego(self, frame: ScopeFrame, alpha: float) -> None:
     cx, top = frame.cx, frame.origin_y
-    rl.draw_circle_gradient(rl.Vector2(cx, top + EGO_H * 0.55), 52, rgba(WHITE, 0.16 * alpha), rgba(WHITE, 0.0))
+    rl.draw_circle_gradient(rl.Vector2(cx, top + EGO_H * 0.55), 56, rgba(WHITE, 0.16 * alpha), rgba(WHITE, 0.0))
     body = rl.Rectangle(cx - EGO_W / 2, top, EGO_W, EGO_H)
     rl.draw_rectangle_rounded(body, 0.5, 10, rgba(WHITE, alpha))
     shade = rgba(INK, 0.5 * alpha)
     rl.draw_rectangle_rounded(rl.Rectangle(cx - EGO_W * 0.36, top + EGO_H * 0.2, EGO_W * 0.72, EGO_H * 0.2), 0.5, 6, shade)
     rl.draw_rectangle_rounded(rl.Rectangle(cx - EGO_W * 0.32, top + EGO_H * 0.68, EGO_W * 0.64, EGO_H * 0.14), 0.5, 6, rgba(INK, 0.35 * alpha))
     # nose marker, the origin radar distances are measured from
-    draw_triangle((cx - 5, top - 3), (cx + 5, top - 3), (cx, top - 11), rgba(WHITE, 0.9 * alpha))
+    draw_triangle((cx - 8, top - 3), (cx + 8, top - 3), (cx, top - 15), rgba(WHITE, 0.9 * alpha))
