@@ -125,6 +125,18 @@ class VisualsLayout(Widget):
 
     # HUD overlays, each behind its own toggle
     self._overlay_defs = {
+      "StopDetection": (
+        lambda: tr("Stop Detection"),
+        tr("Show the moment the driving model plans a stop, such as for a red light, stop sign or stopped traffic. " +
+           "A card shows the distance, whether a car is the reason, and whether openpilot will stop for it, and a stop " +
+           "line is drawn on the road. The model doesn't name lights or signs, so a stop with no car ahead is shown as " +
+           "likely a light, sign or crossing."),
+      ),
+      "DetectionLog": (
+        lambda: tr("Detection Log"),
+        tr("List what the model and planner pick up, with the time each was first seen: planned stops, go, new leads, " +
+           "cut-ins, curves and predicted hard braking."),
+      ),
       "LeadGapHistory": (
         lambda: tr("Gap History"),
         tr("Draw the last 30 seconds of following gap as a line under the lead gap badge. Needs a badge style."),
