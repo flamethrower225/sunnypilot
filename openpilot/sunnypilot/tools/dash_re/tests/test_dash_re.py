@@ -44,14 +44,14 @@ def test_motorola_bits():
 
 
 def test_origins_ignore_tx_echo():
-  origins = analysis.origins(synthetic_drive(1))
+  origins = analysis.origins(analysis.build_series(synthetic_drive(1)))
   assert origins[LKAS12] == {2} and analysis.origin_label(origins[LKAS12]) == "camera"
   assert origins[CLU11] == {0}
   assert 0x340 not in origins
 
 
 def test_inventory_finds_counters_and_checksum():
-  stats = analysis.inventory(synthetic_drive())
+  stats = analysis.inventory(analysis.build_series(synthetic_drive()))
   lk = stats[(2, LKAS12)]
   assert abs(lk.hz - 50) < 0.5
   assert (0, 8) in lk.counters
@@ -63,8 +63,8 @@ def test_inventory_finds_counters_and_checksum():
 
 
 def test_marker_diff_points_at_the_changed_field():
-  frames = synthetic_drive()
-  ((marker, changes),) = analysis.marker_diffs(frames, [Marker(int(4.8 * NS), "sign appears")], window_s=1.0, settle_s=0.3)
+  series = analysis.build_series(synthetic_drive())
+  ((marker, changes),) = analysis.marker_diffs(series, [Marker(int(4.8 * NS), "sign appears")], before_s=1.0, after_s=1.0, settle_s=0.3)
   top = {(c.addr, c.bit) for c in changes if c.score == 1.0}
   assert top == {(LKAS12, 16), (LKAS12, 22)}
   assert all(c.before == "0" and c.after == "1" for c in changes if c.score == 1.0)

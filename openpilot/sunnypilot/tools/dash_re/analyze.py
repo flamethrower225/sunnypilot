@@ -42,8 +42,9 @@ def cmd_candidates(args) -> None:
 def cmd_inventory(args) -> None:
   frames, markers = analysis.load(args.file)
   dbc = parse_dbc(HYUNDAI_DBC)
-  origins = analysis.origins(frames)
-  stats = analysis.inventory(frames)
+  series = analysis.build_series(frames)
+  origins = analysis.origins(series)
+  stats = analysis.inventory(series)
   print(f"{len(frames)} frames, {len(stats)} (bus, address) pairs, {len(markers)} labels\n")
   print(f"{'bus':>3} {'addr':>6} {'name':<14} {'origin':<9} {'tier':>4} {'hz':>6} {'len':>4}  changing / counters / checksum / undocumented")
   for (bus, addr), st in sorted(stats.items(), key=lambda kv: (kv[0][1], kv[0][0])):
@@ -69,9 +70,10 @@ def cmd_diff(args) -> None:
     print("no labels in this capture")
     return
   dbc = parse_dbc(HYUNDAI_DBC)
-  origins = analysis.origins(frames)
-  stats = analysis.inventory(frames)
-  for marker, changes in analysis.marker_diffs(frames, markers, args.window, args.settle, stats):
+  series = analysis.build_series(frames)
+  origins = analysis.origins(series)
+  stats = analysis.inventory(series)
+  for marker, changes in analysis.marker_diffs(series, markers, args.window, args.window, args.settle, stats):
     if args.label and args.label.lower() not in marker.label.lower():
       continue
     if args.bus is not None:
