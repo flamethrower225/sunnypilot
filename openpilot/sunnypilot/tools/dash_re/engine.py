@@ -23,6 +23,7 @@ from openpilot.sunnypilot.tools.dash_re.dbcinfo import HYUNDAI_DBC, HYUNDAI_MCAN
 
 DIAG_RANGE = range(0x700, 0x800)  # UDS request/response addresses; multi-frame by nature, not display data
 NAVI_HU = 0x544
+TP_HU_NAVI_CLU = 0x49B  # M-CAN: head unit -> cluster navigation transport
 CLIMATE = {0x40: "DATC14", 0x42: "DATC12", 0x43: "DATC13", 0x44: "DATC11", 0x383: "FATC11"}
 LKAS12 = 0x53E
 
@@ -41,7 +42,9 @@ MAX_EVENTS = 80
 # text scan: printable runs inside a single payload (ASCII or UTF-16LE), and reassembled ISO-TP payloads
 TEXT_ASCII = re.compile(rb"[\x20-\x7e]{5,}")
 TEXT_UTF16 = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
-TEXT_MIN_REPEATS = 3  # text gets resent; random bytes that happen to look printable rarely repeat
+TEXT_MIN_REPEATS = 3
+ISOTP_SHAPE_MIN = 0.9  # a transport channel formats every frame; ordinary data only looks like it by chance (~20%)
+ISOTP_MIN_FRAMES = 20  # text gets resent; random bytes that happen to look printable rarely repeat
 MAX_TEXT_SAMPLES = 24
 
 LATE_S = 10.  # an ID first seen this long after listening started appeared because of something
@@ -92,11 +95,13 @@ class KeyStats:
   toggles: list[int] = field(default_factory=lambda: [0] * 64)
   lengths: set[int] = field(default_factory=set)
   isotp_pairs: int = 0  # first frame followed by consecutive frame #1
+  isotp_shaped: int = 0  # frames whose first byte is a valid ISO-TP header
   pending_first: bool = False
   isotp_buf: bytearray = field(default_factory=bytearray)
   isotp_expect: int = 0
   isotp_seq: int = 0
   texts: Counter = field(default_factory=Counter)
+  last_len: int = 0
   dt_sum: float = 0.  # inter-arrival statistics, seconds
   dt_sq_sum: float = 0.
 
@@ -146,6 +151,7 @@ class DashReEngine:
     st.count += 1
     st.t_last = t
     st.last_v = v
+    st.last_len = len(dat)
     st.lengths.add(len(dat))
     if dat and addr not in DIAG_RANGE:
       self._isotp(st, dat)
@@ -173,8 +179,15 @@ class DashReEngine:
                                 "value": (v >> b) & 1, "signal": sig.name if sig else "", "dash": bool(sig and "CLU" in sig.receivers)})
 
   @staticmethod
+  def isotp_shaped(st: KeyStats) -> bool:
+    return st.count >= ISOTP_MIN_FRAMES and st.isotp_shaped >= ISOTP_SHAPE_MIN * st.count
+
+  @staticmethod
   def _isotp(st: KeyStats, dat: bytes) -> None:
-    pci = dat[0] >> 4
+    pci, low = dat[0] >> 4, dat[0] & 0xF
+    if (pci == 0 and 0 < low < len(dat)) or (pci == 1 and len(dat) == 8 and ((low << 8) | (dat[1] if len(dat) > 1 else 0)) > 7) or \
+       pci == 2 or (pci == 3 and low <= 2):
+      st.isotp_shaped += 1
     if pci == 0 and 0 < (dat[0] & 0xF) < len(dat):  # single frame
       payload = bytes(dat[1:1 + (dat[0] & 0xF)])
       st.pending_first = False
@@ -198,10 +211,10 @@ class DashReEngine:
       st.pending_first = False
       st.isotp_expect = 0
       return
-    if st.isotp_pairs:  # only trust single frames on IDs that also carry real multi-frame payloads
-      text = analysis.printable(payload)
-      if text != payload.hex(" ") and sum(c.isalpha() for c in text) >= 2:
-        st.texts[text.strip()] += TEXT_MIN_REPEATS  # reassembled text counts as confirmed
+    # only trust payloads on IDs that are formatted as a transport channel throughout, not data that looks like it by chance
+    if st.isotp_pairs and DashReEngine.isotp_shaped(st):
+      for text in _text_runs(payload):
+        st.texts[text] += TEXT_MIN_REPEATS  # reassembled text counts as confirmed
 
   def mark(self, label: str, t: int) -> None:
     self.pending_marks.append(Marker(t, label))
@@ -311,9 +324,14 @@ class DashReEngine:
         if msg.cluster_signals and not (self._buses(addr) & {0, 2}) and tier(msg) == 3:
           orphans.append({"addr": addr, "name": msg.name, "sender": msg.sender, "signals": [s.name for s in msg.cluster_signals][:3]})
 
-    mcan_seen = [{"addr": a, "bus": b, "name": self.mcan[a].name} for (b, a) in keys if a in self.mcan and a not in self.dbc]
-    isotp_like = [{"addr": a, "bus": b, "pairs": self.stats[(b, a)].isotp_pairs, "name": self._name(a)}
-                  for (b, a) in keys if self.stats[(b, a)].isotp_pairs >= 2]
+    def last_bytes(st: KeyStats) -> str:
+      return st.last_v.to_bytes(8, "little")[:st.last_len].hex(" ")
+
+    mcan_seen = [{"addr": a, "bus": b, "name": self.mcan[a].name, "hz": self._hz(st), "last": last_bytes(st),
+                  "changing_bits": bin(st.changed_mask).count("1"), "isotp": self.isotp_shaped(st)}
+                 for (b, a) in keys if a in self.mcan and a not in self.dbc and (st := self.stats[(b, a)])]
+    isotp_like = [{"addr": a, "bus": b, "pairs": st.isotp_pairs, "name": self._name(a)}
+                  for (b, a) in keys if (st := self.stats[(b, a)]).isotp_pairs >= 2 and self.isotp_shaped(st)]
     text = []
     for (b, a) in keys:
       samples = [t for t, n in self.stats[(b, a)].texts.most_common() if n >= TEXT_MIN_REPEATS][:4]
@@ -332,6 +350,7 @@ class DashReEngine:
     checks = {
       "Navi_HU (0x544) nav speed limit from head unit": sorted(self._buses(NAVI_HU)),
       "LKAS12 (0x53E) camera speed sign": sorted(self._buses(LKAS12)),
+      "TP_HU_NAVI_CLU (0x49B) head unit to cluster navigation": sorted(self._buses(TP_HU_NAVI_CLU)),
       "climate messages": {name: sorted(self._buses(a)) for a, name in CLIMATE.items()},
     }
     return {"updated": _clock(), "listening_s": round(duration), "buses": {str(k): v for k, v in sorted(per_bus.items())},
@@ -371,7 +390,9 @@ def findings_html(f: dict | None) -> str:
   else:
     orphans = "<p>needs 30 s of listening</p>"
   check_lines = [f"Navi_HU, nav speed limit from the head unit: {where(checks['Navi_HU (0x544) nav speed limit from head unit'])}",
-                 f"LKAS12, camera speed sign: {where(checks['LKAS12 (0x53E) camera speed sign'])}"]
+                 f"LKAS12, camera speed sign: {where(checks['LKAS12 (0x53E) camera speed sign'])}",
+                 "TP_HU_NAVI_CLU 0x49B, head unit to cluster navigation: "
+                 + where(checks.get("TP_HU_NAVI_CLU (0x49B) head unit to cluster navigation", []))]
   check_lines += [f"{escape(n)}, climate: {where(b)}" for n, b in checks["climate messages"].items()]
   parts = [
     "<h2>Dash research findings</h2>",
@@ -380,7 +401,8 @@ def findings_html(f: dict | None) -> str:
     "<p>Multi-frame (ISO-TP) traffic outside diagnostics, the shape text takes on CAN:</p>",
     _ul(_ids(f["isotp_like"], lambda r: f" on bus {r['bus']}, {r['pairs']} sequences"), "none: no sign of text on these buses"),
     "<p>Head unit to cluster (M-CAN) IDs seen on reachable buses:</p>",
-    _ul(_ids(f["mcan_seen"], lambda r: f" on bus {r['bus']}")),
+    _ul(_ids(f["mcan_seen"], lambda r: f" on bus {r['bus']}, {r.get('hz', 0)} Hz, {r.get('changing_bits', 0)} changing bits"
+             + (", formatted as a transport channel" if r.get("isotp") else "") + (f", last: {r['last']}" if r.get("last") else ""))),
     "<p>Readable text found in payloads (repeated, or reassembled from multi-frame):</p>",
     _ul([f"{r['addr']:#05x} {escape(r['name'])} on bus {r['bus']}: " + " | ".join(escape(t) for t in r["samples"])
          for r in f.get("text", [])], "none"),
