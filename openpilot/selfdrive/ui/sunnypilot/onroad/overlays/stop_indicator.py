@@ -245,9 +245,19 @@ def is_stopped(sm) -> bool:
   return sm['carState'].vEgo < STOPPED_SPEED
 
 
+def age_text(seconds: float) -> str:
+  """How long ago, in whole minutes, so the idle line doesn't tick every second."""
+  if seconds < 60:
+    return tr("<1m")
+  if seconds < 3600:
+    return tr("{}m").format(int(seconds // 60))
+  return tr("1h+")
+
+
 class DetectionLogPanel:
   """What the model and planner picked up. While driving only the newest event shows, large, for a few seconds; once
-  stopped the last few come back with their timestamps, when there is time to read them."""
+  stopped the last few come back with their timestamps, when there is time to read them. In between it shrinks to one dim
+  line with the last event and how long ago it was, so it's plain the log is on."""
 
   def __init__(self):
     self._font_bold = gui_app.font(FontWeight.BOLD)
@@ -260,27 +270,47 @@ class DetectionLogPanel:
       self._alpha.x = 0.0
       return
     update_feed()
-    show = LOG_SHOW if is_stopped(ui_state.sm) else LOG_SHOW_MOVING
-    self._alpha.update(1.0 if time.monotonic() - get_detection_feed().last_event_mono < show else 0.0)
+    self._alpha.update(1.0)
 
   def render(self, rect: rl.Rectangle) -> None:
     alpha = self._alpha.x
     if not ui_state.detection_log or alpha < 0.01:
       return
     now = time.monotonic()
-    events = [e for e in get_detection_feed().log if now - e.mono_time < LOG_SHOW]
-    if not events:
-      return
+    log = list(get_detection_feed().log)
+    recent = [e for e in log if now - e.mono_time < LOG_SHOW]
+    stopped = is_stopped(ui_state.sm)
 
     x, w = column(rect)
     target = _card_bottom + LOG_GAP if _card_bottom is not None else rect.y + TOP
     if not self._top.initialized or target > self._top.x:
       self._top.x, self._top.initialized = target, True  # get out from under the card at once, ease back up
     y = self._top.update(target)
-    if is_stopped(ui_state.sm):
-      self._draw_list(x, y, w, events[:LOG_ROWS_STOPPED], now, alpha)
+    if stopped and recent:
+      self._draw_list(x, y, w, recent[:LOG_ROWS_STOPPED], now, alpha)
+    elif not stopped and log and now - log[0].mono_time < LOG_SHOW_MOVING:
+      self._draw_latest(x, y, w, log[0], now, alpha)
     else:
-      self._draw_latest(x, y, w, events[0], now, alpha)
+      self._draw_idle(x, y, w, log[0] if log else None, now, alpha)
+
+  def _draw_idle(self, x: float, y: float, w: float, event: DetectionEvent | None, now: float, alpha: float) -> None:
+    if event is not None:
+      label, rgb = EVENT_STYLE[event.kind]
+      text, age = tr(label), age_text(now - event.mono_time)
+    else:
+      rgb, text, age = MUTED_RGB, tr("Nothing yet"), ""
+    h = LINE_SIZE + 2 * 12
+    panel = rl.Rectangle(x, y, w, h)
+    rl.draw_rectangle_rounded(panel, roundness(h / 2, w, h), 12, rgba(BLACK, 0.45 * alpha))
+    cy = y + h / 2
+    rl.draw_circle_v(rl.Vector2(x + LOG_PAD + LOG_DOT, cy), LOG_DOT, rgba(rgb, 0.6 * alpha))
+    tx = x + LOG_PAD + 2 * LOG_DOT + 14
+    ty = cy - measure_text_cached(self._font_semi, text, LINE_SIZE).y / 2
+    text_w = draw_text(self._font_semi, text, LINE_SIZE, tx, ty, rgba(WHITE, 0.6 * alpha)).x
+    # how long ago, right aligned, left out when the label leaves no room
+    age_w = measure_text_cached(self._font_semi, age, LINE_SIZE).x
+    if age and tx + text_w + 16 + age_w <= x + w - LOG_PAD:
+      draw_text(self._font_semi, age, LINE_SIZE, x + w - LOG_PAD - age_w, ty, rgba(WHITE, 0.45 * alpha))
 
   def _fit_detail(self, detail: str, room: float) -> str:
     """Drops trailing parts of the detail until it fits."""

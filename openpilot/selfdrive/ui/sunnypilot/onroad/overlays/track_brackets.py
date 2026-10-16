@@ -7,7 +7,6 @@ See the LICENSE.md file in the root directory for more details.
 Track brackets: corner brackets projected onto radar tracks in the camera view, so you can see what the radar sees.
 """
 import math
-import time
 from collections.abc import Callable
 
 import numpy as np
@@ -16,7 +15,7 @@ import pyray as rl
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, STROKE_MIN, TEXT_MIN, WHITE, ZONE_RGB, rgba, \
   draw_text, draw_delta_arrow, roundness
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, format_distance, speed_value
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, LeadGapBadgeStyle, format_distance, speed_value
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import BOARD_TTC_MAX, CLASS_RGB, RadarFeed, RadarTrack, TrackClass, Lane, \
   display_zone, in_threat_corridor, rank_threats, NO_TRACK
@@ -43,7 +42,7 @@ CLOSING_MIN_TAG = 0.5                # m/s, slower than this the tag shows dista
 
 
 def select_tracks(tracks: list[RadarTrack], skip_id: int = NO_TRACK, limit: int = MAX_TRACKS, max_threats: int = MAX_TAGS) -> list[RadarTrack]:
-  """The tracks that get brackets: the nearest ones within reach, except the lead (it has its own lock) and with the
+  """The tracks that get brackets: the nearest ones within reach, except skip_id (the lead, when it has its own lock) and with the
   most threatening ones always included, even when the nearest few are all guardrail. Returned nearest first."""
   candidates = [t for t in tracks if 0.0 < t.d_rel < MAX_DISTANCE and abs(t.y_rel) <= MAX_LATERAL and t.track_id != skip_id]
   chosen = rank_threats([t for t in candidates if display_zone(t) is not None])[:max_threats]
@@ -96,7 +95,7 @@ class _Bracket:
 class TrackBrackets:
   """Corner brackets on up to eight radar tracks, 1.8 m x 1.3 m at the track's distance. Closing threats are colored by time to
   collision, same-direction traffic is cyan, oncoming pink, stationary things dim gray. The two most threatening carry a tag
-  with their closing speed. The lead is skipped, it has its own lock."""
+  with their closing speed. The lead is skipped when the lead lock badge brackets it already."""
 
   def __init__(self):
     self._font_bold = gui_app.font(FontWeight.BOLD)
@@ -113,8 +112,11 @@ class TrackBrackets:
       self._tagged = set()
       self._brackets.clear()
       return
-    self._feed.update(ui_state.sm, ui_state.started_frame, time.monotonic())
-    self._selected = select_tracks(self._feed.tracks, self._feed.lead_ids[0])
+    self._feed.update(ui_state.sm, ui_state.started_frame)
+    # the lead lock badge already brackets the lead; with any other style the lead gets a bracket like everything else,
+    # which on a radar that only reports the car ahead is the only one there is
+    skip = self._feed.lead_ids[0] if ui_state.lead_gap_badge == LeadGapBadgeStyle.LOCK else NO_TRACK
+    self._selected = select_tracks(self._feed.tracks, skip)
     self._tagged = tagged_tracks(self._selected)
 
   def render(self, rect: rl.Rectangle, projector: RoadProjector) -> None:

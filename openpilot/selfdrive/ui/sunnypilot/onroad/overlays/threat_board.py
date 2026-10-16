@@ -7,7 +7,6 @@ See the LICENSE.md file in the root directory for more details.
 Threat board: the radar tracks closing on us, most urgent first, in the right column of the HUD.
 """
 import math
-import time
 
 import numpy as np
 import pyray as rl
@@ -16,9 +15,10 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import DeveloperUiState
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, TEXT_MIN, WHITE, ZONE_RGB, rgba, draw_text, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, ZoneHysteresis, format_distance
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import Lane, RadarFeed, RadarTrack, select_threats, ttc_zone
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import Lane, RadarFeed, RadarTrack, board_rows, ttc_zone
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 
 PANEL_W = 420.0
@@ -61,9 +61,10 @@ class _Row:
 
 
 class ThreatBoard:
-  """Up to three rows, most urgent first, each tinted in its severity color: a three-lane icon with the track's lane lit, the
-  distance and a large time to collision. The lead's row has a white outline, the second lead's a dim one. Stationary things
-  (signs, guardrails) never get a row, and the board is hidden while nothing is closing."""
+  """Up to three rows, each tinted in its severity color: a three-lane icon with the track's lane lit, the distance and a large
+  time to collision. Whatever is closing on us comes first, most urgent first, then the leads even when they aren't closing,
+  so a radar that only reports the car ahead still fills a row. The lead's row has a white outline, the second lead's a dim
+  one. Stationary things (signs, guardrails) never get a row; with nothing to list the board says the road is clear."""
 
   def __init__(self):
     self._font_bold = gui_app.font(FontWeight.BOLD)
@@ -73,14 +74,15 @@ class ThreatBoard:
     self._alpha = FirstOrderFilter(0.0, 0.15, dt)
     self._rows_height = FirstOrderFilter(0.0, 0.12, dt)
     self._rows: dict[int, _Row] = {}
+    self._clear = FirstOrderFilter(0.0, 0.12, dt)  # the "clear" row, shown while there is nothing to list
 
   def update(self) -> None:
     if not ui_state.threat_board:
       self._alpha.x = 0.0
       self._rows.clear()
       return
-    self._feed.update(ui_state.sm, ui_state.started_frame, time.monotonic())
-    ranked = select_threats(self._feed.tracks, self._feed.lead_ids, MAX_ROWS) if self._feed.available else []
+    self._feed.update(ui_state.sm, ui_state.started_frame)
+    ranked = board_rows(self._feed.tracks, self._feed.leads, MAX_ROWS) if self._feed.available else []
 
     seen = set()
     for slot, t in enumerate(ranked):
@@ -88,7 +90,7 @@ class ThreatBoard:
       if row is None:
         row = self._rows[t.track_id] = _Row(self._dt, slot)
       row.track = t
-      row.lead = 1 if t.track_id == self._feed.lead_ids[0] else (2 if t.track_id == self._feed.lead_ids[1] else 0)
+      row.lead = self._feed.lead_rank(t.track_id)
       row.zone = row.hysteresis.update(ttc_zone(t.ttc))
       row.color.update(np.array(ZONE_RGB[row.zone], dtype=float))
       row.slot.update(slot)
@@ -101,9 +103,9 @@ class ThreatBoard:
         if row.alpha.update(0.0) < 0.02:
           del self._rows[track_id]
 
-    if ranked:
-      self._rows_height.update(len(ranked) * SLOT_H - (SLOT_H - ROW_H))
-    self._alpha.update(1.0 if ranked else 0.0)
+    self._rows_height.update(max(len(ranked), 1) * SLOT_H - (SLOT_H - ROW_H))
+    self._clear.update(0.0 if ranked or self._rows else 1.0)  # waits for the last row to fade out
+    self._alpha.update(1.0 if self._feed.available else 0.0)
 
   def render(self, rect: rl.Rectangle) -> None:
     if not ui_state.threat_board:
@@ -120,6 +122,19 @@ class ThreatBoard:
     now = rl.get_time()
     for row in sorted(self._rows.values(), key=lambda r: r.slot.x):
       self._draw_row(panel, row, now, alpha)
+    if self._clear.x > 0.02:
+      self._draw_clear_row(panel, self._clear.x * alpha)
+
+  def _draw_clear_row(self, panel: rl.Rectangle, alpha: float) -> None:
+    rgb = ZONE_RGB[GapZone.GOOD]
+    x, y, w = panel.x + PAD, panel.y + TOP_PAD, panel.width - 2 * PAD
+    cy = y + ROW_H / 2
+    rl.draw_rectangle_rounded(rl.Rectangle(x, y, w, ROW_H), roundness(16, w, ROW_H), 12, rgba(rgb, 0.14 * alpha))
+    cx = x + 18
+    cx += self._draw_lane_icon(cx, cy, None, rgb, alpha) + 18
+    label = tr("Clear")
+    size = measure_text_cached(self._font_bold, label, DIST_SIZE)
+    draw_text(self._font_bold, label, DIST_SIZE, cx, cy - size.y / 2, rgba(rgb, alpha))
 
   def _draw_row(self, panel: rl.Rectangle, row: _Row, now: float, panel_alpha: float) -> None:
     t = row.track
@@ -151,9 +166,9 @@ class ThreatBoard:
     self._draw_value(x + w - 16 - ttc_w, cy, ttc_text, TTC_SIZE, "s", rgba(rgb, alpha), rgba(rgb, 0.85 * alpha), gap=3.0)
 
   @staticmethod
-  def _draw_lane_icon(x: float, cy: float, lane: Lane, rgb, alpha: float) -> float:
-    """Three lane bars with the track's lane lit, readable without reading a letter. Returns the width used."""
-    lit = LANE_INDEX[lane]
+  def _draw_lane_icon(x: float, cy: float, lane: Lane | None, rgb, alpha: float) -> float:
+    """Three lane bars with the track's lane lit (none for the clear row), readable without reading a letter. Returns the width used."""
+    lit = LANE_INDEX[lane] if lane is not None else -1
     top = cy - LANE_ICON_H / 2
     for i in range(3):
       bar = rl.Rectangle(x + i * (LANE_ICON_BAR + LANE_ICON_GAP), top, LANE_ICON_BAR, LANE_ICON_H)

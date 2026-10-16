@@ -13,7 +13,8 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import CONFIRM_
   SHOW_CLEARED, SHOW_GO, DetectionEvent, DetectionFeed, EventDetector, EventKind, StopDetector, StopPhase, predicted_stop_distance, \
   stop_is_for_car
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.disengage_meter import PANEL_WIDTH as RISK_WIDTH
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import X_FROM_CENTER, clock, event_detail, planner_follows_model
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import X_FROM_CENTER, age_text, clock, event_detail, \
+  planner_follows_model
 
 DT = 0.05
 T = np.linspace(0, 10, 33)
@@ -251,6 +252,10 @@ class TestStopIndicatorHelpers(OpenpilotTestCase):
   def test_card_clears_the_risk_meter(self):
     # both sit under the speed: the risk meter centered, the card's column starting right of center
     assert RISK_WIDTH / 2 + 10 <= X_FROM_CENTER
+
+  @parameterized.expand([(0.0, "<1m"), (59.9, "<1m"), (60.0, "1m"), (59 * 60 + 59, "59m"), (3600.0, "1h+"), (5 * 3600.0, "1h+")])
+  def test_age_text_is_in_whole_minutes(self, seconds, expected):
+    assert age_text(seconds) == expected
 
   def test_clock_has_tenths(self):
     text = clock(1_700_000_000.37)

@@ -156,7 +156,8 @@ class VisualsLayout(Widget):
       ),
       "RadarScope": (
         lambda: tr("Radar Scope"),
-        tr("Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. Needs a car that reports radar tracks."),
+        tr("Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. " +
+           "With a radar that reports only the car ahead, or no radar tracks, it shows the leads openpilot picks."),
       ),
       "RadarTrackBrackets": (
         lambda: tr("Radar Track Brackets"),
@@ -164,7 +165,8 @@ class VisualsLayout(Widget):
       ),
       "ThreatBoard": (
         lambda: tr("Threat Board"),
-        tr("List the nearest radar tracks ranked by time to collision on the right side of the screen."),
+        tr("List what is closing on you, ranked by time to collision, and the car ahead even when it isn't, " +
+           "on the right side of the screen."),
       ),
       "DisengageHorizon": (
         lambda: tr("Disengage Risk Meter"),

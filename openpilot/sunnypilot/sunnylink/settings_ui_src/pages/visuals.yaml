@@ -116,7 +116,7 @@ sections:
   - key: RadarScope
     widget: toggle
     title: Radar Scope
-    description: Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. Needs a car that reports radar tracks.
+    description: 'Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. With a radar that reports only the car ahead, or no radar tracks, it shows the leads openpilot picks.'
   - key: RadarTrackBrackets
     widget: toggle
     title: Radar Track Brackets
@@ -124,7 +124,7 @@ sections:
   - key: ThreatBoard
     widget: toggle
     title: Threat Board
-    description: List the nearest radar tracks ranked by time to collision on the right side of the screen.
+    description: 'List what is closing on you, ranked by time to collision, and the car ahead even when it isn''t, on the right side of the screen.'
   - key: DisengageHorizon
     widget: toggle
     title: Disengage Risk Meter

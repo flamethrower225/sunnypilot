@@ -7,7 +7,6 @@ See the LICENSE.md file in the root directory for more details.
 Radar scope: a top-down minimap of the model's lane lines and every radar track, in the left column of the HUD.
 """
 import math
-import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -120,7 +119,7 @@ class RadarScope:
       self._alpha.x = 0.0
       return
     sm = ui_state.sm
-    self._feed.update(sm, ui_state.started_frame, time.monotonic())
+    self._feed.update(sm, ui_state.started_frame)
     self._alpha.update(1.0 if self._feed.available else 0.0)
     if self._alpha.x > 0.01:
       self._update_lanes(sm)
