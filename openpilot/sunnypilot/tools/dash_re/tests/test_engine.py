@@ -154,3 +154,32 @@ def test_mark_reports_messages_that_appear():
   (tr,) = r["traffic"]
   assert (tr["addr"], tr["kind"], tr["hz_before"]) == (0x5F3, "appeared", 0.0)
   assert "appeared" in results_html([r])
+
+
+def test_control_messages_that_look_like_isotp_are_not_text():
+  # like MDPS12 on the Elantra: 100 Hz data whose first byte is sometimes 0x1_ then 0x2_ by chance
+  e = DashReEngine()
+  rng = random.Random(3)
+  for i in range(10_000):
+    e.ingest(int(i / 100 * NS), 0, 0x251, bytes(rng.getrandbits(8) for _ in range(8)))
+  f = e.findings()
+  assert e.stats[(0, 0x251)].isotp_pairs > 0  # the coincidence happens...
+  assert f["isotp_like"] == [] and f["text"] == []  # ...but is not reported
+
+
+def test_real_transport_channel_text_is_found_and_described():
+  e = DashReEngine()
+  text = "Main St".encode("utf-16-le")
+  for i in range(40):
+    t = int(i * 0.5 * NS)
+    e.ingest(t, 0, 0x49B, bytes([0x10, len(text)]) + text[:6])
+    e.ingest(t + 1000, 0, 0x49B, bytes([0x21]) + text[6:13])
+    e.ingest(t + 2000, 0, 0x49B, bytes([0x22]) + text[13:] + bytes(6))
+  f = e.findings()
+  assert [r["addr"] for r in f["isotp_like"]] == [0x49B]
+  assert {r["addr"]: r["samples"] for r in f["text"]} == {0x49B: ["Main St"]}
+  (m,) = f["mcan_seen"]
+  assert m["name"] == "TP_HU_NAVI_CLU" and m["isotp"] and m["last"].startswith("22")
+  assert f["checks"]["TP_HU_NAVI_CLU (0x49B) head unit to cluster navigation"] == [0]
+  html = findings_html(f)
+  assert "formatted as a transport channel" in html and "0x49B, head unit to cluster navigation: bus 0" in html

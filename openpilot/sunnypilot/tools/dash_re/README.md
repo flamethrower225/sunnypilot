@@ -176,7 +176,7 @@ Tier 2 messages need entries in the panda safety TX list, `HYUNDAI_TX_MSGS` / `H
 `opendbc_repo/opendbc/safety/modes/hyundai.h`. For example, to take over `LKAS12`:
 
 ```c
-{0x53E, 0, 6, .check_relay = true},   /* LKAS12 Bus 0 */
+{0x53E, 0, 8, .check_relay = true},   /* LKAS12 Bus 0 */
 ```
 
 `check_relay = true` stops the panda forwarding the camera's copy, so the cluster only sees ours.
@@ -184,7 +184,7 @@ sunnypilot still reads the camera's original on bus 2 for its speed-limit input.
 
 Things to check before shipping a change like this:
 
-- Check `LKAS12`'s real length in a capture first; the DBC says 6 bytes.
+- `LKAS12` is 8 bytes on the 2023 Elantra (Dash Research, length check), although the DBC says 6.
 - Run the opendbc safety tests (`opendbc_repo/opendbc/safety/tests/test_hyundai.py`) after the change.
 - The device builds the panda firmware from this repo and reflashes it on boot when it changes, so a
   safety change ships like any other code.
