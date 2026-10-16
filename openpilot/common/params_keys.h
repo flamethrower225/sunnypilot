@@ -197,6 +197,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // HUD overlays
     {"CurveHologram", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"DetectionLog", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"DisengageHorizon", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"DriverFlags", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"FollowGhost", {PERSISTENT | BACKUP, BOOL, "0"}},
@@ -205,6 +206,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LeadGapHistory", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"RadarScope", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"RadarTrackBrackets", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"StopDetection", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"ThreatBoard", {PERSISTENT | BACKUP, BOOL, "0"}},
 
     // MADS params

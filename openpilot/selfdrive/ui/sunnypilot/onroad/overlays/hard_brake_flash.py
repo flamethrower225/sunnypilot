@@ -29,10 +29,10 @@ EDGE_STEP = 4.0         # px between bands
 EDGE_LAYERS = 20        # so the glow reaches about 80 px in from the edge
 EDGE_ALPHA = 0.3       # opacity of the outermost band at full strength
 
-PILL_TOP = 360.0        # from the top of the HUD content rect, under the disengage meter
-PILL_HEIGHT = 52.0
-PILL_TEXT_SIZE = 28.0
-PILL_ICON = 30.0
+PILL_TOP = 404.0        # from the top of the HUD content rect, under the disengage meter
+PILL_HEIGHT = 70.0
+PILL_TEXT_SIZE = 44.0   # a warning, so well above the 36 px floor
+PILL_ICON = 48.0
 
 
 class HoldLatch:

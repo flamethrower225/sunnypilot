@@ -10,25 +10,26 @@ import pyray as rl
 from openpilot.cereal import log
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, WHITE, ZONE_RGB, rgba, draw_text, \
-  draw_text_centered, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, TEXT_MIN, WHITE, ZONE_RGB, rgba, draw_text, \
+  roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 
-PANEL_WIDTH = 340.0
-PANEL_HEIGHT = 47.0
-PANEL_TOP = 305.0       # from the top of the HUD content rect, just under the speed unit
-PANEL_RADIUS = 12.0
-PAD_X = 10.0
-CELL_GAP = 5.0
-CELL_TOP = 21.0
-CELL_HEIGHT = 22.0
-CAPTION_Y = 4.0
-CAPTION_SIZE = 15.0
-LABEL_SIZE = 15.0
+# one compact row so it covers as little of the road as possible: dot, RISK, total %, then the cells near to far
+PANEL_WIDTH = 450.0     # clear of the stop card, which starts 240 px right of center
+PANEL_HEIGHT = 60.0
+PANEL_TOP = 328.0       # from the top of the HUD content rect, just under the speed unit
+PANEL_RADIUS = 18.0
+PAD_X = 14.0
+CELL_GAP = 6.0
+CELL_HEIGHT = 34.0
+CELLS_WIDTH = 170.0
+CAPTION_SIZE = float(TEXT_MIN)
+VALUE_SIZE = 44.0
+DOT_RADIUS = 10.0
 MAX_CELLS = 8
 DEFAULT_STEP = 2.0      # s between horizons when the model doesn't say
 
@@ -163,32 +164,30 @@ class DisengageMeter:
     rl.draw_rectangle_rounded(panel, roundness(PANEL_RADIUS, w, h), 16, rgba(BLACK, 0.62 * alpha))
     rl.draw_rectangle_rounded_lines_ex(panel, roundness(PANEL_RADIUS, w, h), 16, 1.5, rgba(WHITE, 0.28 * alpha))
 
-    self._draw_caption(x0, y0, w, alpha)
-    self._draw_cells(x0, y0 + CELL_TOP, w, alpha)
+    self._draw_caption(x0, y0, alpha)
+    self._draw_cells(x0 + w - PAD_X - CELLS_WIDTH, y0 + (h - CELL_HEIGHT) / 2, alpha)
 
-  def _draw_caption(self, x0: float, y0: float, w: float, alpha: float) -> None:
-    y = y0 + CAPTION_Y
-    draw_text(self._font_bold, tr("DISENGAGE RISK"), CAPTION_SIZE, x0 + PAD_X + 2, y, rgba(WHITE, 0.72 * alpha), spacing=1.2)
-
-    # model confidence dot with the total chance of a takeover inside the full horizon
+  def _draw_caption(self, x0: float, y0: float, alpha: float) -> None:
+    # model confidence dot, then the total chance of a takeover inside the full horizon
+    cy = y0 + PANEL_HEIGHT / 2
+    dot_center = rl.Vector2(x0 + PAD_X + DOT_RADIUS + 2, cy)
+    rl.draw_circle_v(dot_center, DOT_RADIUS + 3, rgba(BLACK, 0.5 * alpha))
+    rl.draw_circle_v(dot_center, DOT_RADIUS, rgba(self._dot.x, alpha))
+    x = dot_center.x + DOT_RADIUS + 14
+    label_sz = measure_text_cached(self._font_bold, tr("RISK"), int(CAPTION_SIZE), 1.5)
+    draw_text(self._font_bold, tr("RISK"), CAPTION_SIZE, x, cy - label_sz.y / 2, rgba(WHITE, 0.72 * alpha), spacing=1.5)
     total = percent_text(float(self._total.x))
-    total_sz = measure_text_cached(self._font_bold, total, int(CAPTION_SIZE))
-    right = x0 + w - PAD_X - 2
-    draw_text(self._font_bold, total, CAPTION_SIZE, right - total_sz.x, y, rgba(WHITE, 0.9 * alpha))
-    radius = 5.0
-    dot_center = rl.Vector2(right - total_sz.x - 10 - radius, y + total_sz.y / 2)
-    rl.draw_circle_v(dot_center, radius + 2.5, rgba(BLACK, 0.5 * alpha))
-    rl.draw_circle_v(dot_center, radius, rgba(self._dot.x, alpha))
+    total_sz = measure_text_cached(self._font_bold, total, int(VALUE_SIZE))
+    draw_text(self._font_bold, total, VALUE_SIZE, x + label_sz.x + 14, cy - total_sz.y / 2, rgba(WHITE, alpha))
 
-  def _draw_cells(self, x0: float, y: float, w: float, alpha: float) -> None:
+  def _draw_cells(self, x: float, y: float, alpha: float) -> None:
+    # no per-cell labels: the cells run from the nearest horizon on the left to the farthest on the right
     risks = self._risk.x
     n = len(risks)
-    cell_w = (w - 2 * PAD_X - (n - 1) * CELL_GAP) / n
+    cell_w = (CELLS_WIDTH - (n - 1) * CELL_GAP) / n
     for i, risk in enumerate(risks):
       color = risk_color(float(risk))
-      cell = rl.Rectangle(x0 + PAD_X + i * (cell_w + CELL_GAP), y, cell_w, CELL_HEIGHT)
-      round_cell = roundness(6.0, cell_w, CELL_HEIGHT)
+      cell = rl.Rectangle(x + i * (cell_w + CELL_GAP), y, cell_w, CELL_HEIGHT)
+      round_cell = roundness(8.0, cell_w, CELL_HEIGHT)
       rl.draw_rectangle_rounded(cell, round_cell, 8, rgba(WHITE, 0.1 * alpha))
       rl.draw_rectangle_rounded(cell, round_cell, 8, rgba(color, 0.94 * alpha))
-      label = self._labels[i] if i < len(self._labels) else ""
-      draw_text_centered(self._font_bold, label, LABEL_SIZE, cell.x + cell_w / 2, cell.y + CELL_HEIGHT / 2, rgba(INK, 0.9 * alpha))

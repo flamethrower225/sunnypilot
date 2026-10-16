@@ -10,7 +10,8 @@ import pyray as rl
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.sunnypilot.onroad.chevron_metrics import ChevronMetrics
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge import LeadGapBadgeState, LeadGapBadgeStyle, LeadLock, RoadPaint
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge import LeadGapBadgeRenderer, LeadGapBadgeState, LeadGapBadgeStyle, LeadLock, \
+  RoadPaint
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.lock import LEAD_HALF_WIDTH, LEAD_HEIGHT
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays import RoadOverlays, RoadProjector
 from openpilot.selfdrive.ui.sunnypilot.onroad.rainbow_path import RainbowPath
@@ -80,7 +81,8 @@ class ModelRendererSP:
         rl.draw_triangle_fan(lead.chevron, len(lead.chevron), rl.Color(201, 34, 49, lead.fill_alpha))
 
     if self._lead_lock_state.alpha > 0.01:
-      self.lead_lock.render(self._rect, reading, self._lead_lock_state.zone_color.rgb, self._lead_lock_state.alpha, ui_state.is_metric)
+      self.lead_lock.render(self._rect, reading, self._lead_lock_state.zone_color.rgb, self._lead_lock_state.alpha, ui_state.is_metric,
+                            LeadGapBadgeRenderer.history_reserve(sm))
 
   def _draw_road_paint_path(self) -> bool:
     """Paint style tints the path with the gap zone color. Returns True when it drew the path."""

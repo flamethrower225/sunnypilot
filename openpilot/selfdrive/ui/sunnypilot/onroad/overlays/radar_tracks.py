@@ -8,8 +8,11 @@ Radar track parsing, classification and threat ranking shared by the radar overl
 """
 import itertools
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
+
+import numpy as np
 
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, CRITICAL_LIMITS, CLOSE_LIMITS, CAUTION_TTC, \
@@ -20,8 +23,9 @@ ADJACENT_LANE_LIMIT = 5.4      # m, the neighboring lanes end here
 STATIONARY_SPEED = 1.0         # m/s, |absolute speed| below this is a sign, guardrail or parked car
 MAX_POINTS = 48                # radarTracks never carries more than this many useful points
 BOARD_TTC_MAX = 20.0           # s, closing slower than this isn't worth a row on the threat board
-FEED_HOLD = 8.0                # s the overlays stay up after the last track, so an empty road doesn't blink them away
 NO_TRACK = -1
+VISION_LEAD_IDS = (-2, -3)     # leadOne and leadTwo when no radar track is behind them, so each still has an id of its own
+RADAR_TO_CAMERA = 1.52         # m, the model's distances are from the camera, radar distances from the front bumper
 
 
 class TrackClass(IntEnum):
@@ -54,6 +58,7 @@ class RadarTrack:
   cls: TrackClass
   lane: Lane
   ttc: float        # s, inf unless closing
+  lateral_estimated: bool = False  # the radar gave no lateral position, y_rel was filled in (see parse_tracks)
 
   @property
   def y_right(self) -> float:
@@ -88,19 +93,30 @@ def time_to_collision(d_rel: float, v_rel: float) -> float:
   return d_rel / closing if closing > MIN_CLOSING_SPEED else math.inf
 
 
-def make_track(track_id: int, d_rel: float, y_rel: float, v_rel: float, v_ego: float) -> RadarTrack:
+def make_track(track_id: int, d_rel: float, y_rel: float, v_rel: float, v_ego: float, lateral_estimated: bool = False) -> RadarTrack:
   v_abs = v_rel + v_ego
-  return RadarTrack(int(track_id), d_rel, y_rel, v_rel, v_abs, classify_motion(v_abs), lane_of(y_rel), time_to_collision(d_rel, v_rel))
+  return RadarTrack(int(track_id), d_rel, y_rel, v_rel, v_abs, classify_motion(v_abs), lane_of(y_rel), time_to_collision(d_rel, v_rel),
+                    lateral_estimated)
 
 
-def parse_tracks(points, v_ego: float) -> list[RadarTrack]:
-  """Turns radarTracks.points into RadarTracks, skipping garbage (NaNs, nothing ahead of the bumper)."""
+LateralFallback = Callable[[int, float], float]
+
+
+def parse_tracks(points, v_ego: float, lateral_fallback: LateralFallback | None = None) -> list[RadarTrack]:
+  """Turns radarTracks.points into RadarTracks, skipping garbage (NaN distance or speed, nothing ahead of the bumper).
+  Radars that only report the ACC target (Hyundai, Kia and Genesis on camera SCC, for one) give no lateral position. Those
+  points are kept: lateral_fallback(track_id, d_rel) fills it in, or without one the point sits in our lane, which is where
+  an ACC target is."""
   tracks = []
   for p in itertools.islice(points, MAX_POINTS):
     d_rel, y_rel, v_rel = p.dRel, p.yRel, p.vRel
-    if not (math.isfinite(d_rel) and math.isfinite(y_rel) and math.isfinite(v_rel)) or d_rel <= 0.0:
+    if not (math.isfinite(d_rel) and math.isfinite(v_rel)) or d_rel <= 0.0:
       continue
-    tracks.append(make_track(p.trackId, d_rel, y_rel, v_rel, v_ego))
+    estimated = not math.isfinite(y_rel)
+    if estimated:
+      y_rel = lateral_fallback(p.trackId, d_rel) if lateral_fallback is not None else 0.0
+      y_rel = y_rel if math.isfinite(y_rel) else 0.0
+    tracks.append(make_track(p.trackId, d_rel, y_rel, v_rel, v_ego, estimated))
   return tracks
 
 
@@ -147,11 +163,21 @@ def rank_threats(tracks: list[RadarTrack]) -> list[RadarTrack]:
   return sorted(tracks, key=threat_key)
 
 
-def select_threats(tracks: list[RadarTrack], lead_ids: tuple[int, int] = (NO_TRACK, NO_TRACK), limit: int = 4) -> list[RadarTrack]:
+def select_threats(tracks: list[RadarTrack], lead_ids: tuple[int, ...] = (NO_TRACK, NO_TRACK), limit: int = 4) -> list[RadarTrack]:
   """The most threatening tracks for the board: closing within BOARD_TTC_MAX and in the corridor. A radar-matched lead is
   included whenever it's closing, even if it's stationary (a stopped car ahead)."""
   candidates = [t for t in tracks if t.ttc <= BOARD_TTC_MAX and (in_threat_corridor(t) or t.track_id in lead_ids)]
   return rank_threats(candidates)[:limit]
+
+
+def board_rows(tracks: list[RadarTrack], leads: list[RadarTrack], limit: int = 3) -> list[RadarTrack]:
+  """Threat board rows: whatever is closing on us, most urgent first, then the leads even when they aren't closing. A radar
+  that reports only the car it follows, or no tracks at all, still gives the board a row for that car."""
+  known = {t.track_id for t in tracks}
+  pool = tracks + [t for t in leads if t.track_id not in known]
+  rows = select_threats(pool, tuple(t.track_id for t in leads), limit)
+  taken = {t.track_id for t in rows}
+  return rows + [t for t in leads if t.track_id not in taken][:limit - len(rows)]
 
 
 # ---- leads ----
@@ -194,7 +220,7 @@ class TrackSmoother:
         f[1].update(t.y_rel)
         f[2].update(t.v_rel)
       filters[t.track_id] = f
-      smoothed.append(make_track(t.track_id, f[0].x, f[1].x, f[2].x, v_ego))
+      smoothed.append(make_track(t.track_id, f[0].x, f[1].x, f[2].x, v_ego, t.lateral_estimated))
     self._filters = filters
     return smoothed
 
@@ -205,13 +231,13 @@ def service_fresh(sm, service: str, started_frame: int) -> bool:
 
 
 class RadarFeed:
-  """Everything the radar overlays read each frame: smoothed tracks, whether there is radar data at all, and the leads."""
+  """Everything the radar overlays read each frame: smoothed tracks, whether there is anything to show, and the leads.
+  It works down from full radar: a radar with many tracks, one that reports only the ACC target, and a car with no radar
+  tracks at all, where the leads radard picked (from the model when there's no radar) are all there is."""
 
-  def __init__(self, dt: float, hold: float = FEED_HOLD):
+  def __init__(self, dt: float):
     self._smoother = TrackSmoother(dt)
-    self._hold = hold
-    self._last_seen = -math.inf
-    self.available = False       # radar is publishing and has had something to say recently
+    self.available = False       # radar tracks or radard's leads are arriving
     self.tracks: list[RadarTrack] = []
     self.v_ego = 0.0
     self.lead_ids = (NO_TRACK, NO_TRACK)
@@ -219,30 +245,66 @@ class RadarFeed:
     self.lead_two: RadarTrack | None = None
     self.vision_leads: tuple[RadarTrack | None, RadarTrack | None] = (None, None)  # leads with no radar track behind them
 
-  def update(self, sm, started_frame: int, now: float) -> bool:
+  @property
+  def leads(self) -> list[RadarTrack]:
+    """leadOne then leadTwo, from their radar track when they have one."""
+    return [t for t in (self.lead_one or self.vision_leads[0], self.lead_two or self.vision_leads[1]) if t is not None]
+
+  def lead_rank(self, track_id: int) -> int:
+    """1 for leadOne, 2 for leadTwo, 0 for anything else."""
+    for rank, ids in enumerate(zip(self.lead_ids, VISION_LEAD_IDS, strict=True), start=1):
+      if track_id != NO_TRACK and track_id in ids:
+        return rank
+    return 0
+
+  def update(self, sm, started_frame: int) -> bool:
     self.v_ego = float(sm['carState'].vEgo) if sm.recv_frame['carState'] >= started_frame else 0.0
 
-    radar_ok = service_fresh(sm, 'radarTracks', started_frame)
-    raw = parse_tracks(sm['radarTracks'].points, self.v_ego) if radar_ok else []
-    self.tracks = self._smoother.update(raw, self.v_ego)
-    if self.tracks:
-      self._last_seen = now
-    self.available = radar_ok and now - self._last_seen < self._hold
+    tracks_ok = service_fresh(sm, 'radarTracks', started_frame)
+    state_ok = service_fresh(sm, 'radarState', started_frame)
+    self.available = tracks_ok or state_ok
+    radar_state = sm['radarState'] if state_ok else None
+    self.lead_ids = lead_track_ids(radar_state) if radar_state is not None else (NO_TRACK, NO_TRACK)
 
-    self.lead_ids = (NO_TRACK, NO_TRACK)
-    self.vision_leads = (None, None)
-    if self.available and service_fresh(sm, 'radarState', started_frame):
-      radar_state = sm['radarState']
-      self.lead_ids = lead_track_ids(radar_state)
-      matched = match_leads(self.tracks, self.lead_ids)
-      vision = []
-      for lead, track in zip((radar_state.leadOne, radar_state.leadTwo), matched, strict=True):
+    raw = parse_tracks(sm['radarTracks'].points, self.v_ego, self._lateral_fallback(sm, started_frame, radar_state)) if tracks_ok else []
+    self.tracks = self._smoother.update(raw, self.v_ego)
+    self.lead_one, self.lead_two = match_leads(self.tracks, self.lead_ids)
+
+    vision: list[RadarTrack | None] = [None, None]
+    if radar_state is not None:
+      for i, (lead, track) in enumerate(zip((radar_state.leadOne, radar_state.leadTwo), (self.lead_one, self.lead_two), strict=True)):
         if lead.present and track is None and lead.dRel > 0 and math.isfinite(lead.dRel) and math.isfinite(lead.yRel):
-          vision.append(make_track(NO_TRACK, lead.dRel, lead.yRel, lead.vRel, self.v_ego))
-        else:
-          vision.append(None)
-      self.vision_leads = (vision[0], vision[1])
-    else:
-      matched = (None, None)
-    self.lead_one, self.lead_two = matched
+          vision[i] = make_track(VISION_LEAD_IDS[i], lead.dRel, lead.yRel, lead.vRel, self.v_ego)
+    self.vision_leads = (vision[0], vision[1])
     return self.available
+
+  def _lateral_fallback(self, sm, started_frame: int, radar_state) -> LateralFallback:
+    """Lateral position for a radar point that has none. radard gives the lead it matched to the point the model's lateral
+    position, so that point takes the lead's; any other sits on the planned path at its distance."""
+    by_id = {}
+    if radar_state is not None:
+      for lead, track_id in zip((radar_state.leadOne, radar_state.leadTwo), self.lead_ids, strict=True):
+        if track_id != NO_TRACK and math.isfinite(lead.yRel):
+          by_id[track_id] = float(lead.yRel)
+    path: tuple[np.ndarray, np.ndarray] | None = None
+
+    def lateral(track_id: int, d_rel: float) -> float:
+      nonlocal path
+      if track_id in by_id:
+        return by_id[track_id]
+      if path is None:  # only read the plan when a point actually needs it
+        path = planned_path(sm, started_frame)
+      if path[0].size:
+        return -float(np.interp(d_rel + RADAR_TO_CAMERA, path[0], path[1]))  # the model's y is right positive
+      return 0.0
+    return lateral
+
+
+def planned_path(sm, started_frame: int) -> tuple[np.ndarray, np.ndarray]:
+  """x and y (m, right positive) of the model's planned path, empty when there is no plan this drive."""
+  if sm.recv_frame.get('modelV2', -1) < started_frame:
+    return np.empty(0), np.empty(0)
+  position = sm['modelV2'].position
+  xs, ys = list(position.x), list(position.y)  # capnp lists don't slice
+  n = min(len(xs), len(ys))
+  return np.asarray(xs[:n], dtype=float), np.asarray(ys[:n], dtype=float)

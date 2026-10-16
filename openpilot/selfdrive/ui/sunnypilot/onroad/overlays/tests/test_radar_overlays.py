@@ -10,16 +10,17 @@ from types import SimpleNamespace
 import numpy as np
 import pyray as rl
 
+from openpilot.cereal import messaging
 from openpilot.common.parameterized import parameterized
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import DeveloperUiState
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import LANE_DISTANCES, MAX_LATERAL, MAX_RANGE, PANEL_H, PANEL_W, \
-  ScopeFrame, ring_points, ring_ranges, scope_frame, scope_rect
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import BOARD_TTC_MAX, FEED_HOLD, MAX_POINTS, NO_TRACK, Lane, RadarFeed, \
-  TrackClass, TrackSmoother, classify_motion, display_zone, in_threat_corridor, is_threat, lane_of, lead_track_ids, make_track, \
-  match_leads, parse_tracks, rank_threats, select_threats, service_fresh, time_to_collision, ttc_zone
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.threat_board import HEADER_H, PANEL_W as BOARD_W, ROW_H, SLOT_H, board_rect, \
+  ScopeFrame, ring_points, ring_radii, scope_frame, scope_rect
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import BOARD_TTC_MAX, MAX_POINTS, NO_TRACK, RADAR_TO_CAMERA, \
+  VISION_LEAD_IDS, Lane, RadarFeed, TrackClass, TrackSmoother, board_rows, classify_motion, display_zone, in_threat_corridor, is_threat, \
+  lane_of, lead_track_ids, make_track, match_leads, parse_tracks, rank_threats, select_threats, service_fresh, time_to_collision, ttc_zone
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.threat_board import TOP_PAD, PANEL_W as BOARD_W, ROW_H, SLOT_H, board_rect, \
   format_ttc
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.track_brackets import BOX_HEIGHT, BOX_WIDTH, MAX_TRACKS, MIN_BOX_H, MIN_BOX_W, \
   pad_box, project_box, select_tracks, tagged_tracks
@@ -148,13 +149,33 @@ class TestParse(OpenpilotTestCase):
 
   @parameterized.expand([
     ("nan_distance", (1, math.nan, 0.0, 0.0)),
-    ("nan_lateral", (1, 20.0, math.nan, 0.0)),
     ("inf_speed", (1, 20.0, 0.0, INF)),
     ("behind_the_bumper", (1, -2.0, 0.0, 0.0)),
     ("at_the_bumper", (1, 0.0, 0.0, 0.0)),
   ])
   def test_garbage_is_skipped(self, _, row):
     assert parse_tracks(points(row, (2, 30.0, 0.0, 0.0)), V_EGO) == [track(2, 30.0)]
+
+  def test_single_target_radar_without_lateral_is_kept_in_our_lane(self):
+    # Hyundai, Kia and Genesis on camera SCC report only the ACC target, with yRel NaN
+    tracks = parse_tracks(points((3, 42.0, math.nan, -2.0)), V_EGO)
+    assert len(tracks) == 1
+    t = tracks[0]
+    assert t.d_rel == 42.0 and t.y_rel == 0.0 and t.lane == Lane.CENTER and t.lateral_estimated and t.closing
+
+  def test_missing_lateral_comes_from_the_fallback(self):
+    asked = []
+
+    def fallback(track_id, d_rel):
+      asked.append((track_id, d_rel))
+      return 2.5
+    tracks = parse_tracks(points((3, 42.0, math.nan, -2.0), (4, 60.0, -1.0, 0.0)), V_EGO, fallback)
+    assert asked == [(3, 42.0)]
+    assert tracks[0].y_rel == 2.5 and tracks[0].lateral_estimated
+    assert tracks[1].y_rel == -1.0 and not tracks[1].lateral_estimated
+
+  def test_a_nan_fallback_still_lands_in_our_lane(self):
+    assert parse_tracks(points((3, 42.0, math.nan, 0.0)), V_EGO, lambda *_: math.nan)[0].y_rel == 0.0
 
   def test_point_count_is_capped(self):
     many = points(*[(i, 10.0 + i, 0.0, 0.0) for i in range(200)])
@@ -295,9 +316,9 @@ class TestSmoother(OpenpilotTestCase):
 
 
 class TestRadarFeed(OpenpilotTestCase):
-  def _feed(self, sm, now=0.0, started=1):
+  def _feed(self, sm, started=1):
     feed = RadarFeed(0.05)
-    feed.update(sm, started, now)
+    feed.update(sm, started)
     return feed
 
   def test_reads_tracks_and_ego_speed(self):
@@ -307,41 +328,48 @@ class TestRadarFeed(OpenpilotTestCase):
     assert feed.available and feed.v_ego == V_EGO
     assert [t.cls for t in feed.tracks] == [TrackClass.MOVING, TrackClass.STATIONARY]
 
-  def test_invalid_radar_hides_everything(self):
+  @parameterized.expand([("invalid", "valid"), ("stale", "alive")])
+  def test_bad_radar_tracks_are_ignored_but_the_leads_stay(self, _, field):
     sm = FakeSM()
     sm.data["radarTracks"].points = points((7, 40.0, 0.0, -1.0))
-    sm.valid["radarTracks"] = False
+    sm.data["radarState"] = SimpleNamespace(leadOne=lead(track_id=7), leadTwo=lead(present=False))
+    getattr(sm, field)["radarTracks"] = False
     feed = self._feed(sm)
-    assert not feed.available and feed.tracks == []
+    assert feed.available and feed.tracks == []
+    assert feed.lead_one is None and feed.vision_leads[0] is not None and feed.leads == [feed.vision_leads[0]]
 
-  def test_stale_radar_hides_everything(self):
+  @parameterized.expand([("invalid", "valid"), ("stale", "alive")])
+  def test_nothing_fresh_hides_everything(self, _, field):
     sm = FakeSM()
     sm.data["radarTracks"].points = points((7, 40.0, 0.0, -1.0))
-    sm.alive["radarTracks"] = False
-    assert not self._feed(sm).available
+    getattr(sm, field)["radarTracks"] = False
+    getattr(sm, field)["radarState"] = False
+    feed = self._feed(sm)
+    assert not feed.available and feed.tracks == [] and feed.leads == []
 
   def test_radar_from_before_the_drive_is_ignored(self):
     sm = FakeSM(started=3)
     sm.data["radarTracks"].points = points((7, 40.0, 0.0, -1.0))
     sm.recv_frame["radarTracks"] = 2
+    sm.recv_frame["radarState"] = 2
     assert not self._feed(sm, started=3).available
     assert not service_fresh(sm, "radarTracks", 3)
     assert service_fresh(sm, "radarTracks", 2)
 
-  def test_radarless_car_stays_hidden(self):
+  def test_no_tracks_still_shows_the_overlays(self):
+    # an empty road, or a radar that only reports the car ahead while there is none: the overlays stay up instead of vanishing
     feed = self._feed(FakeSM())
-    assert not feed.available and feed.tracks == []
+    assert feed.available and feed.tracks == [] and feed.leads == []
 
   def test_an_empty_road_doesnt_blink_the_overlays_away(self):
     sm = FakeSM()
     feed = RadarFeed(0.05)
     sm.data["radarTracks"].points = points((7, 40.0, 0.0, -1.0))
-    feed.update(sm, 1, 0.0)
+    feed.update(sm, 1)
     sm.data["radarTracks"].points = []
-    feed.update(sm, 1, FEED_HOLD - 1.0)
-    assert feed.available
-    feed.update(sm, 1, FEED_HOLD + 0.5)
-    assert not feed.available
+    for _ in range(200):
+      feed.update(sm, 1)
+    assert feed.available and feed.tracks == []
 
   def test_lead_is_matched_to_its_track(self):
     sm = FakeSM()
@@ -351,6 +379,8 @@ class TestRadarFeed(OpenpilotTestCase):
     assert feed.lead_ids == (7, 11)
     assert feed.lead_one.track_id == 7 and feed.lead_two.track_id == 11
     assert feed.vision_leads == (None, None)
+    assert [t.track_id for t in feed.leads] == [7, 11]
+    assert (feed.lead_rank(7), feed.lead_rank(11), feed.lead_rank(3), feed.lead_rank(NO_TRACK)) == (1, 2, 0, 0)
 
   def test_vision_lead_has_no_track(self):
     sm = FakeSM()
@@ -358,7 +388,16 @@ class TestRadarFeed(OpenpilotTestCase):
     sm.data["radarState"] = SimpleNamespace(leadOne=lead(radar=False, d_rel=55.0, y_rel=-0.5, v_rel=-2.0), leadTwo=lead(present=False))
     feed = self._feed(sm)
     assert feed.lead_ids == (NO_TRACK, NO_TRACK) and feed.lead_one is None
-    assert feed.vision_leads[0].d_rel == 55.0 and feed.vision_leads[0].y_rel == -0.5 and feed.vision_leads[1] is None
+    vision = feed.vision_leads[0]
+    assert vision.d_rel == 55.0 and vision.y_rel == -0.5 and feed.vision_leads[1] is None
+    assert vision.track_id == VISION_LEAD_IDS[0] and feed.lead_rank(vision.track_id) == 1
+
+  def test_both_vision_leads_have_their_own_ids(self):
+    sm = FakeSM()
+    sm.data["radarState"] = SimpleNamespace(leadOne=lead(radar=False, d_rel=30.0), leadTwo=lead(radar=False, d_rel=60.0, y_rel=3.5))
+    feed = self._feed(sm)
+    assert [t.track_id for t in feed.leads] == list(VISION_LEAD_IDS)
+    assert [feed.lead_rank(t.track_id) for t in feed.leads] == [1, 2]
 
   def test_stale_radar_state_means_no_leads(self):
     sm = FakeSM()
@@ -366,7 +405,79 @@ class TestRadarFeed(OpenpilotTestCase):
     sm.data["radarState"] = SimpleNamespace(leadOne=lead(track_id=7), leadTwo=lead(present=False))
     sm.valid["radarState"] = False
     feed = self._feed(sm)
-    assert feed.available and feed.lead_one is None and feed.lead_ids == (NO_TRACK, NO_TRACK)
+    assert feed.available and feed.lead_one is None and feed.lead_ids == (NO_TRACK, NO_TRACK) and feed.leads == []
+
+
+class TestSingleTrackRadar(OpenpilotTestCase):
+  """A radar that only reports the ACC target, with no lateral position (Hyundai, Kia and Genesis on camera SCC)."""
+
+  def _feed(self, sm):
+    feed = RadarFeed(0.05)
+    feed.update(sm, 1)
+    return feed
+
+  def test_the_one_track_takes_the_leads_lateral_position(self):
+    # radard matches the track to the model's lead and gives the lead the model's lateral position
+    sm = FakeSM()
+    sm.data["radarTracks"].points = points((5, 40.0, math.nan, -3.0))
+    sm.data["radarState"] = SimpleNamespace(leadOne=lead(track_id=5, y_rel=0.8, v_rel=-3.0), leadTwo=lead(present=False))
+    feed = self._feed(sm)
+    assert len(feed.tracks) == 1
+    t = feed.tracks[0]
+    assert t.y_rel == 0.8 and t.lateral_estimated and t.closing
+    assert feed.lead_one is t and feed.vision_leads == (None, None) and feed.leads == [t]
+
+  def test_an_unmatched_track_sits_on_the_planned_path(self):
+    sm = FakeSM()
+    sm.data["radarTracks"].points = points((5, 40.0, math.nan, 0.0))
+    sm.recv_frame["modelV2"] = 1
+    # a real capnp message: its lists don't slice, which plain lists would hide
+    model = messaging.new_message('modelV2')
+    model.modelV2.position.x = [0.0, 20.0, 40.0 + RADAR_TO_CAMERA, 80.0]
+    model.modelV2.position.y = [0.0, 0.5, 1.2, 2.0]
+    sm.data["modelV2"] = model.modelV2
+    feed = self._feed(sm)
+    assert abs(feed.tracks[0].y_rel - -1.2) < 1e-5   # capnp floats are float32; the model's y is right positive, yRel left positive
+
+  def test_without_a_model_it_sits_in_our_lane(self):
+    sm = FakeSM()
+    sm.data["radarTracks"].points = points((5, 40.0, math.nan, 0.0))
+    assert self._feed(sm).tracks[0].y_rel == 0.0
+
+  def test_the_board_lists_the_one_track_even_when_it_isnt_closing(self):
+    sm = FakeSM()
+    sm.data["radarTracks"].points = points((5, 40.0, math.nan, 0.5))
+    sm.data["radarState"] = SimpleNamespace(leadOne=lead(track_id=5, y_rel=0.2, v_rel=0.5), leadTwo=lead(present=False))
+    feed = self._feed(sm)
+    assert [t.track_id for t in board_rows(feed.tracks, feed.leads)] == [5]
+
+
+class TestBoardRows(OpenpilotTestCase):
+  def test_nothing_to_list(self):
+    assert board_rows([], []) == []
+    assert board_rows([track(1, 40.0, 0.0, 2.0)], []) == []   # pulling away, not a lead
+
+  def test_a_lead_gets_a_row_without_closing(self):
+    lead_track = track(7, 40.0, 0.0, 1.0)
+    assert board_rows([lead_track], [lead_track]) == [lead_track]
+
+  def test_threats_come_before_the_leads(self):
+    lead_track, threat = track(7, 40.0, 0.0, 1.0), track(3, 30.0, 3.6, -10.0)
+    assert [t.track_id for t in board_rows([lead_track, threat], [lead_track])] == [3, 7]
+
+  def test_a_closing_lead_is_ranked_with_the_threats_once(self):
+    lead_track, threat = track(7, 20.0, 0.0, -10.0), track(3, 30.0, 3.6, -5.0)
+    assert [t.track_id for t in board_rows([threat, lead_track], [lead_track])] == [7, 3]
+
+  def test_a_closing_vision_lead_is_ranked_with_the_threats(self):
+    vision, threat = track(VISION_LEAD_IDS[0], 20.0, 0.0, -10.0), track(3, 30.0, 3.6, -5.0)
+    assert [t.track_id for t in board_rows([threat], [vision])] == [VISION_LEAD_IDS[0], 3]
+
+  def test_limit(self):
+    threats = [track(i, 20.0 + i, 0.0, -10.0) for i in range(4)]
+    lead_track = track(9, 60.0, 0.0, 0.0)
+    rows = board_rows(threats + [lead_track], [lead_track], limit=3)
+    assert len(rows) == 3 and lead_track not in rows
 
 
 class TestScopeGeometry(OpenpilotTestCase):
@@ -425,11 +536,9 @@ class TestScopeGeometry(OpenpilotTestCase):
     assert ScopeFrame.visible(d, y) == expected
 
   def test_rings(self):
-    assert [label for _, label in ring_ranges(True)] == ["25", "50", "100"]
-    assert [r for r, _ in ring_ranges(True)] == [25.0, 50.0, 100.0]
-    imperial = ring_ranges(False)
-    assert [label for _, label in imperial] == ["100", "200", "300"]
-    assert abs(imperial[0][0] - 30.48) < 0.01 and imperial[-1][0] < MAX_RANGE
+    assert ring_radii(True) == [25.0, 50.0, 100.0]
+    imperial = ring_radii(False)
+    assert abs(imperial[0] - 30.48) < 0.01 and imperial[-1] < MAX_RANGE
 
   def test_ring_points_stay_on_the_circle(self):
     pts = ring_points(25.0)
@@ -453,12 +562,12 @@ class TestBrackets(OpenpilotTestCase):
     return (sx, sy) if 0 <= sx <= 2160 and 0 <= sy <= 1080 else None
 
   def test_box_size_follows_distance(self):
-    near = project_box(self._pinhole, 20.0, 0.0)
-    far = project_box(self._pinhole, 80.0, 0.0)
+    near = project_box(self._pinhole, 15.0, 0.0)
+    far = project_box(self._pinhole, 60.0, 0.0)
     assert near is not None and far is not None
     assert near[2] - near[0] > 3.5 * (far[2] - far[0])
-    assert abs((near[2] - near[0]) - 1500 * BOX_WIDTH / 20.0) < 1e-6
-    assert abs((near[3] - near[1]) - 1500 * BOX_HEIGHT / 20.0) < 1e-6
+    assert abs((near[2] - near[0]) - 1500 * BOX_WIDTH / 15.0) < 1e-6
+    assert abs((near[3] - near[1]) - 1500 * BOX_HEIGHT / 15.0) < 1e-6
 
   def test_box_stands_on_the_road(self):
     box = project_box(self._pinhole, 40.0, 1.5)
@@ -508,7 +617,7 @@ class TestBrackets(OpenpilotTestCase):
     chosen = select_tracks(clutter + [threat])
     assert len(chosen) == MAX_TRACKS and threat in chosen
 
-  def test_tags_go_to_the_three_most_threatening(self):
+  def test_tags_go_to_the_two_most_threatening(self):
     tracks = [
       track(1, 20.0, 0.0, -10.0),    # ttc 2
       track(2, 40.0, 3.6, -8.0),     # ttc 5
@@ -516,7 +625,7 @@ class TestBrackets(OpenpilotTestCase):
       track(4, 90.0, 0.0, -1.0),     # ttc 90
       track(5, 30.0, 0.0, 2.0),      # opening, but right there
     ]
-    assert tagged_tracks(tracks) == {1, 2, 3}
+    assert tagged_tracks(tracks) == {1, 2}
     assert tagged_tracks(tracks, count=5) == {1, 2, 3, 5}
 
   def test_distant_traffic_pulling_away_is_not_tagged(self):
@@ -548,7 +657,7 @@ class TestBoardLayout(OpenpilotTestCase):
     one = board_rect(HUD, None, ROW_H)
     four = board_rect(HUD, None, 3 * SLOT_H + ROW_H)
     assert four.height - one.height == 3 * SLOT_H
-    assert one.height > HEADER_H + ROW_H
+    assert one.height > TOP_PAD + ROW_H
 
   def test_clear_of_the_wheel_button(self):
     assert board_rect(HUD, None, 0.0).y >= HUD.y + 230

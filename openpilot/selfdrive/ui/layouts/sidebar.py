@@ -1,5 +1,4 @@
 import pyray as rl
-import time
 from dataclasses import dataclass
 from collections.abc import Callable
 from openpilot.cereal import log
@@ -9,7 +8,7 @@ from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 
-from openpilot.selfdrive.ui.sunnypilot.layouts.sidebar import SidebarSP
+from openpilot.selfdrive.ui.sunnypilot.layouts.sidebar import SidebarSP, BatteryMetricData, BATTERY_METER_SPACE
 
 SIDEBAR_WIDTH = 300
 METRIC_HEIGHT = 126
@@ -73,7 +72,6 @@ class Sidebar(Widget, SidebarSP):
 
     self._temp_status = MetricData(tr_noop("TEMP"), tr_noop("GOOD"), Colors.GOOD)
     self._panda_status = MetricData(tr_noop("VEHICLE"), tr_noop("ONLINE"), Colors.GOOD)
-    self._connect_status = MetricData(tr_noop("CONNECT"), tr_noop("OFFLINE"), Colors.WARNING)
     self._recording_audio = False
 
     self._home_img = gui_app.texture("images/button_home.png", HOME_BTN.width, HOME_BTN.height)
@@ -113,8 +111,8 @@ class Sidebar(Widget, SidebarSP):
     self._recording_audio = ui_state.recording_audio
     self._update_network_status(device_state)
     self._update_temperature_status(device_state)
-    self._update_connection_status(device_state)
     self._update_panda_status()
+    SidebarSP._update_battery_status(self)
     SidebarSP._update_sunnylink_status(self)
 
   def _update_network_status(self, device_state):
@@ -129,15 +127,6 @@ class Sidebar(Widget, SidebarSP):
       self._temp_status.update(tr_noop("TEMP"), tr_noop("GOOD"), Colors.GOOD)
     else:
       self._temp_status.update(tr_noop("TEMP"), tr_noop("HIGH"), Colors.DANGER)
-
-  def _update_connection_status(self, device_state):
-    last_ping = device_state.lastAthenaPingTime
-    if last_ping == 0:
-      self._connect_status.update(tr_noop("CONNECT"), tr_noop("OFFLINE"), Colors.WARNING)
-    elif time.monotonic_ns() - last_ping < 80_000_000_000:  # 80 seconds in nanoseconds
-      self._connect_status.update(tr_noop("CONNECT"), tr_noop("ONLINE"), Colors.GOOD)
-    else:
-      self._connect_status.update(tr_noop("CONNECT"), tr_noop("ERROR"), Colors.DANGER)
 
   def _update_panda_status(self):
     if ui_state.panda_type == log.PandaState.PandaType.unknown:
@@ -210,18 +199,18 @@ class Sidebar(Widget, SidebarSP):
 
   def _draw_metrics(self, rect: rl.Rectangle):
     if gui_app.sunnypilot_ui():
-      metrics, start_y, spacing = SidebarSP._draw_metrics_w_sunnylink(self, rect, self._temp_status, self._panda_status, self._connect_status)
+      metrics, start_y, spacing = SidebarSP._draw_metrics_w_sunnylink(self, rect, self._temp_status, self._panda_status, self._battery_status)
       for idx, metric in enumerate(metrics):
         self._draw_metric(rect, metric, start_y + idx * spacing)
 
       return
 
-    metrics = [(self._temp_status, 338), (self._panda_status, 496), (self._connect_status, 654)]
+    metrics = [(self._temp_status, 338), (self._panda_status, 496), (self._battery_status, 654)]
 
     for metric, y_offset in metrics:
       self._draw_metric(rect, metric, rect.y + y_offset)
 
-  def _draw_metric(self, rect: rl.Rectangle, metric: MetricData, y: float):
+  def _draw_metric(self, rect: rl.Rectangle, metric: MetricData | BatteryMetricData, y: float):
     metric_rect = rl.Rectangle(rect.x + METRIC_MARGIN, y, METRIC_WIDTH, METRIC_HEIGHT)
     # Draw colored left edge (clipped rounded rectangle)
     edge_rect = rl.Rectangle(metric_rect.x + 4, metric_rect.y + 4, 100, 118)
@@ -232,9 +221,10 @@ class Sidebar(Widget, SidebarSP):
     # Draw border
     rl.draw_rectangle_rounded_lines_ex(metric_rect, 0.3, 10, 2, Colors.METRIC_BORDER)
 
-    # Draw label and value
+    # Draw label and value, nudged up over the battery meter
+    is_battery = isinstance(metric, BatteryMetricData)
     labels = [tr(metric.label), tr(metric.value)]
-    text_y = metric_rect.y + (metric_rect.height / 2 - len(labels) * FONT_SIZE * FONT_SCALE)
+    text_y = metric_rect.y + (metric_rect.height / 2 - len(labels) * FONT_SIZE * FONT_SCALE) - (BATTERY_METER_SPACE if is_battery else 0)
     for text in labels:
       text_size = measure_text_cached(self._font_bold, text, FONT_SIZE)
       text_y += text_size.y
@@ -243,3 +233,6 @@ class Sidebar(Widget, SidebarSP):
         text_y
       )
       rl.draw_text_ex(self._font_bold, text, text_pos, FONT_SIZE, 0, Colors.WHITE)
+
+    if is_battery:
+      SidebarSP._draw_battery_meter(metric_rect, metric)

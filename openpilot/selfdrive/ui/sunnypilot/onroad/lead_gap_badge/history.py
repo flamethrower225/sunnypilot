@@ -9,15 +9,17 @@ from collections import deque
 
 import pyray as rl
 
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE, ZONE_RGB, rgba, draw_text, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE, ZONE_RGB, rgba, roundness, zone_bands
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, LeadGapReading
-from openpilot.system.ui.lib.multilang import tr
 
 WINDOW = 30.0         # s of history
 SAMPLE_PERIOD = 0.25  # s
 GAP_MAX = 3.0         # s at the top of the graph
-SPARKLINE_HEIGHT = 74
+SPARKLINE_HEIGHT = 130
 SPARKLINE_GAP = 14    # px between the badge and the graph
+PLOT_INSET = 14
+TRACE_WIDTH = 10
+NOW_DOT = 14
 
 
 class GapHistory:
@@ -44,41 +46,57 @@ class GapHistory:
     self._timer = 0.0
 
 
-def draw_sparkline(font: rl.Font, history: GapHistory, x: float, y: float, w: float, target_gap: float | None, alpha: float) -> None:
+def draw_sparkline(history: GapHistory, x: float, y: float, w: float, t_follow: float, target_gap: float | None, alpha: float) -> None:
+  """No text: the trace sits over the zone colors, so how high it is reads as close or comfortable at a glance,
+  and its slope shows whether the gap is shrinking."""
   h = SPARKLINE_HEIGHT
-  rl.draw_rectangle_rounded(rl.Rectangle(x, y, w, h), roundness(18, w, h), 10, rgba(BLACK, 0.55 * alpha))
-
-  label = tr("{}s").format(int(WINDOW))
-  label_sz = draw_text(font, label, 20, x + 14, y + h - 30, rgba(WHITE, 0.5 * alpha))
-  plot_x, plot_w = x + 14 + label_sz.x + 12, w - (14 + label_sz.x + 12) - 18
-  plot_y, plot_h = y + 10, h - 20
+  rl.draw_rectangle_rounded(rl.Rectangle(x, y, w, h), roundness(20, w, h), 10, rgba(BLACK, 0.6 * alpha))
+  plot_x, plot_y = x + PLOT_INSET, y + PLOT_INSET
+  plot_w, plot_h = w - 2 * PLOT_INSET, h - 2 * PLOT_INSET
 
   def gy(gap: float) -> float:
     return plot_y + plot_h * (1 - gap / GAP_MAX)
 
+  for zone, lo, hi in zone_bands(t_follow, GAP_MAX):
+    rl.draw_rectangle_rec(rl.Rectangle(plot_x, gy(hi), plot_w, gy(lo) - gy(hi)), rgba(ZONE_RGB[zone], 0.16 * alpha))
+
   if target_gap is not None and 0 < target_gap < GAP_MAX:
     ty = gy(target_gap)
-    dash, step = 10.0, 18.0
+    dash, step = 18.0, 30.0
     dx = 0.0
     while dx < plot_w:
-      rl.draw_line_ex(rl.Vector2(plot_x + dx, ty), rl.Vector2(plot_x + min(dx + dash, plot_w), ty), 2, rgba(WHITE, 0.35 * alpha))
+      rl.draw_line_ex(rl.Vector2(plot_x + dx, ty), rl.Vector2(plot_x + min(dx + dash, plot_w), ty), 4, rgba(WHITE, 0.6 * alpha))
       dx += step
 
   samples = history.samples
   slots = samples.maxlen or 1
   start = slots - len(samples)
-  prev = None
-  last_point = None
+  col_w = plot_w / max(slots - 1, 1)
+  points: list[tuple[rl.Vector2, GapZone] | None] = []
   for i, (gap, zone) in enumerate(samples):
     if math.isnan(gap):
+      points.append(None)
+      continue
+    p = rl.Vector2(plot_x + col_w * (start + i), gy(gap))
+    points.append((p, zone))
+    # filled area under the trace
+    rl.draw_rectangle_rec(rl.Rectangle(p.x - col_w / 2, p.y, col_w + 0.5, plot_y + plot_h - p.y), rgba(ZONE_RGB[zone], 0.3 * alpha))
+
+  half = TRACE_WIDTH / 2
+  prev = None
+  for item in points:
+    if item is None:
       prev = None
       continue
-    point = rl.Vector2(plot_x + plot_w * (start + i) / max(slots - 1, 1), gy(gap))
+    p, zone = item
+    color = rgba(ZONE_RGB[zone], alpha)
     if prev is not None:
-      rl.draw_line_ex(prev, point, 4, rgba(ZONE_RGB[zone], alpha))
-    prev = point
-    last_point = (point, zone)
+      rl.draw_line_ex(prev, p, TRACE_WIDTH, color)
+    rl.draw_circle_v(p, half, color)  # round joints
+    prev = p
 
-  if last_point is not None:
-    point, zone = last_point
-    rl.draw_circle_v(point, 7, rgba(ZONE_RGB[zone], alpha))
+  last = next((item for item in reversed(points) if item is not None), None)
+  if last is not None:
+    p, zone = last
+    rl.draw_circle_v(p, NOW_DOT + 4, rgba(WHITE, alpha))
+    rl.draw_circle_v(p, NOW_DOT, rgba(ZONE_RGB[zone], alpha))

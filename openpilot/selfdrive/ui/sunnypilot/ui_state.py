@@ -35,7 +35,8 @@ class UIStateSP:
     self.is_sp_release: bool = self.params.get_bool("IsReleaseSpBranch")
     self.sm_services_ext = [
       "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP",
-      "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay", "radarTracks"
+      "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay", "radarTracks",
+      "peripheralState"
     ]
 
     self.sunnylink_state = SunnylinkState()
@@ -61,6 +62,8 @@ class UIStateSP:
     self.radar_scope: bool = False
     self.radar_track_brackets: bool = False
     self.threat_board: bool = False
+    self.stop_detection: bool = False
+    self.detection_log: bool = False
     self.onroad_brightness: int = 0
     self.onroad_brightness_timer: int = 0
     self.onroad_brightness_timer_param: int = 0
@@ -186,6 +189,8 @@ class UIStateSP:
     self.radar_scope = self.params.get_bool("RadarScope")
     self.radar_track_brackets = self.params.get_bool("RadarTrackBrackets")
     self.threat_board = self.params.get_bool("ThreatBoard")
+    self.stop_detection = self.params.get_bool("StopDetection")
+    self.detection_log = self.params.get_bool("DetectionLog")
     self.onroad_brightness = int(float(self.params.get("OnroadScreenOffBrightness", return_default=True)))
     self.onroad_brightness_timer_param = self.params.get("OnroadScreenOffTimer", return_default=True)
     self.rainbow_path = self.params.get_bool("RainbowMode")

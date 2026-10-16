@@ -125,6 +125,19 @@ class VisualsLayout(Widget):
 
     # HUD overlays, each behind its own toggle
     self._overlay_defs = {
+      "StopDetection": (
+        lambda: tr("Stop Detection"),
+        tr("Show the moment the driving model plans a stop, such as for a red light, stop sign or stopped traffic. " +
+           "A card shows the distance, whether a car is the reason, and whether openpilot will stop for it, and a stop " +
+           "line is drawn on the road. The model doesn't name lights or signs, so a stop with no car ahead is shown as " +
+           "likely a light, sign or crossing."),
+      ),
+      "DetectionLog": (
+        lambda: tr("Detection Log"),
+        tr("Show what the model and planner pick up: planned stops, go, new leads, cut-ins, curves and predicted hard " +
+           "braking. While driving only the newest shows, for a few seconds. When stopped, the last few are listed with " +
+           "the time each was first seen."),
+      ),
       "LeadGapHistory": (
         lambda: tr("Gap History"),
         tr("Draw the last 30 seconds of following gap as a line under the lead gap badge. Needs a badge style."),
@@ -143,7 +156,8 @@ class VisualsLayout(Widget):
       ),
       "RadarScope": (
         lambda: tr("Radar Scope"),
-        tr("Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. Needs a car that reports radar tracks."),
+        tr("Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. " +
+           "With a radar that reports only the car ahead, or no radar tracks, it shows the leads openpilot picks."),
       ),
       "RadarTrackBrackets": (
         lambda: tr("Radar Track Brackets"),
@@ -151,7 +165,8 @@ class VisualsLayout(Widget):
       ),
       "ThreatBoard": (
         lambda: tr("Threat Board"),
-        tr("List the nearest radar tracks ranked by time to collision on the right side of the screen."),
+        tr("List what is closing on you, ranked by time to collision, and the car ahead even when it isn't, " +
+           "on the right side of the screen."),
       ),
       "DisengageHorizon": (
         lambda: tr("Disengage Risk Meter"),

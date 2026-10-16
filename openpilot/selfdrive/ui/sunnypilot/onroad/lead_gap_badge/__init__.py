@@ -22,7 +22,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import Lead
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.road_paint import RoadPaint
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.strip import FollowStrip
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.application import gui_app
 
 __all__ = ["LeadGapBadgeStyle", "LeadGapBadgeState", "LeadGapBadgeRenderer", "LeadLock", "RoadPaint"]
 
@@ -72,7 +72,6 @@ class LeadGapBadgeRenderer:
     self._dial = GapDial()
     self._strip = FollowStrip()
     self._block = SignalBlock()
-    self._font = gui_app.font(FontWeight.SEMI_BOLD)
     self._style = LeadGapBadgeStyle.OFF
 
   def update(self) -> None:
@@ -103,6 +102,13 @@ class LeadGapBadgeRenderer:
       return self._block.width(rect)
     return STANDALONE_SPARKLINE_WIDTH
 
+  @staticmethod
+  def history_reserve(sm) -> float:
+    """How far up from the bottom of the screen the gap history graph reaches, so the lead lock's tag can stay above it."""
+    if not ui_state.lead_gap_history or alert_showing(sm):
+      return 0.0
+    return LeadGapBadgeRenderer.bottom_offset() + SPARKLINE_HEIGHT + SPARKLINE_GAP
+
   def render(self, rect: rl.Rectangle) -> None:
     if self._style == LeadGapBadgeStyle.OFF or self._state.alpha < 0.01:
       return
@@ -112,8 +118,8 @@ class LeadGapBadgeRenderer:
     if ui_state.lead_gap_history:
       w = self._badge_width(rect)
       target = None if reading.low_speed else reading.target_gap
-      draw_sparkline(self._font, self._history, rect.x + (rect.width - w) / 2, rect.y + rect.height - offset - SPARKLINE_HEIGHT, w,
-                     target, alpha)
+      draw_sparkline(self._history, rect.x + (rect.width - w) / 2, rect.y + rect.height - offset - SPARKLINE_HEIGHT, w,
+                     reading.t_follow, target, alpha)
       offset += SPARKLINE_HEIGHT + SPARKLINE_GAP
 
     renderers = {LeadGapBadgeStyle.DIAL: self._dial, LeadGapBadgeStyle.STRIP: self._strip, LeadGapBadgeStyle.BLOCK: self._block}

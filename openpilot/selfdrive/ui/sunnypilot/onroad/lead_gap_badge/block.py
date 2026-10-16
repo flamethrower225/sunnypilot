@@ -7,7 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 import numpy as np
 import pyray as rl
 
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, rgba, zone_label, draw_text, \
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, TEXT_MIN, rgba, zone_label, draw_text, \
   draw_value_with_unit, measure_value_with_unit, draw_delta_arrow, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, LeadGapReading, primary_value, speed_value, \
   speed_delta
@@ -35,8 +35,8 @@ class SignalBlock:
 
   @staticmethod
   def _layout(k: float) -> dict[str, float]:
-    return {"pad_top": 1.4 * k, "pad_x": 2.0 * k, "pad_bottom": 1.6 * k, "row": 1.45 * k, "num": 11.5 * k, "unit": 3.8 * k,
-            "bars": 2.4 * k, "lead": 2.2 * k, "lead_unit": 1.2 * k, "gap": 0.4 * k}
+    return {"pad_top": 1.4 * k, "pad_x": 2.0 * k, "pad_bottom": 1.6 * k, "row": max(TEXT_MIN + 2, 1.45 * k), "num": 11.5 * k,
+            "unit": 3.8 * k, "bars": 2.4 * k, "lead": max(50.0, 2.2 * k), "lead_unit": TEXT_MIN, "gap": 0.4 * k}
 
   def height(self, rect: rl.Rectangle) -> float:
     k = self.width(rect) / UNITS

@@ -15,8 +15,7 @@ from openpilot.selfdrive.monitoring.policy import DRIVER_MONITOR_SETTINGS
 from openpilot.selfdrive.ui.onroad.driver_state import BTN_SIZE
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import get_bottom_dev_ui_offset
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, WHITE, ZONE_RGB, rgba, draw_text, draw_text_centered, \
-  draw_arc, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, TEXT_MIN, WHITE, ZONE_RGB, rgba, draw_text, draw_arc, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -34,15 +33,16 @@ OFF_DELAY = 1.0         # s below threshold before it goes
 FADE_RC = 0.12
 GATE_RC = 0.15
 
-CHIP_HEIGHT = 38.0
+CHIP_HEIGHT = 54.0
 CHIP_GAP = 8.0
-CHIP_TEXT_SIZE = 24.0
-CHIP_ICON = 28.0
-MAX_ROW_WIDTH = 390.0   # keeps the row clear of the lead gap badge
+CHIP_TEXT_SIZE = float(TEXT_MIN)
+CHIP_ICON = 36.0
+GLYPH_SCALE = CHIP_ICON / 28.0  # glyphs were drawn for a 28 px icon
+MAX_ROW_WIDTH = 410.0   # keeps the row clear of the lead gap badge
 ICON_CLEARANCE = 8.0   # between the chips and the top of the driver monitoring icon
 
-READOUT_HEIGHT = 44.0
-READOUT_GAP = 10.0      # between the driver monitoring icon and the attention readout
+RING_GAP = 8.0          # between the driver monitoring icon and the attention ring
+RING_WIDTH = 10.0
 
 
 @dataclass(frozen=True)
@@ -173,9 +173,9 @@ class DriverFlags:
     direction = -1.0 if self._rhd else 1.0
     edge = icon_x - direction * BTN_SIZE / 2
 
-    self._draw_chips(chips, edge, direction, icon_y - BTN_SIZE / 2 - ICON_CLEARANCE)
+    self._draw_chips(chips, edge, direction, icon_y - BTN_SIZE / 2 - ICON_CLEARANCE - RING_GAP - RING_WIDTH)
     strongest = max(a for _, a in chips)
-    self._draw_readout(icon_x + direction * (BTN_SIZE / 2 + READOUT_GAP), icon_y, direction, strongest)
+    self._draw_attention_ring(rl.Vector2(icon_x, icon_y), strongest)
 
   def _draw_chips(self, chips, edge: float, direction: float, bottom: float) -> None:
     """One row along the bottom, most severe at the outer edge. A column of two chips would reach into the radar scope on the left.
@@ -191,7 +191,7 @@ class DriverFlags:
       x += direction * (w + CHIP_GAP) * alpha
 
   def _chip_width(self, flag: FlagSpec) -> float:
-    return 8 + CHIP_ICON + 9 + measure_text_cached(self._font_bold, tr(flag.label), int(CHIP_TEXT_SIZE), 1.0).x + 16
+    return 10 + CHIP_ICON + 10 + measure_text_cached(self._font_bold, tr(flag.label), int(CHIP_TEXT_SIZE), 1.0).x + 18
 
   def _draw_chip(self, flag: FlagSpec, x: float, y: float, w: float, alpha: float) -> None:
     box = rl.Rectangle(x, y, w, CHIP_HEIGHT)
@@ -201,46 +201,39 @@ class DriverFlags:
     rl.draw_rectangle_rounded(box, round_box, 20, rgba(flag.rgb, 0.1 * alpha))
     rl.draw_rectangle_rounded_lines_ex(box, round_box, 20, 2.5, rgba(flag.rgb, (0.7 + 0.3 * breathe) * alpha))
 
-    cx, cy = x + 8 + CHIP_ICON / 2, y + CHIP_HEIGHT / 2
+    cx, cy = x + 10 + CHIP_ICON / 2, y + CHIP_HEIGHT / 2
     rl.draw_circle_v(rl.Vector2(cx, cy), CHIP_ICON / 2, rgba(flag.rgb, alpha))
     if flag.key == "phone":
       self._draw_phone_glyph(cx, cy, alpha)
     else:
       self._draw_closed_eye_glyph(cx, cy, alpha)
-    draw_text(self._font_bold, tr(flag.label), CHIP_TEXT_SIZE, x + 8 + CHIP_ICON + 9,
+    draw_text(self._font_bold, tr(flag.label), CHIP_TEXT_SIZE, x + 10 + CHIP_ICON + 10,
               cy - measure_text_cached(self._font_bold, tr(flag.label), int(CHIP_TEXT_SIZE), 1.0).y / 2, rgba(WHITE, alpha), spacing=1.0)
 
   @staticmethod
   def _draw_phone_glyph(cx: float, cy: float, alpha: float) -> None:
-    body = rl.Rectangle(cx - 5, cy - 8.5, 10, 17)
+    g = GLYPH_SCALE
+    body = rl.Rectangle(cx - 5 * g, cy - 8.5 * g, 10 * g, 17 * g)
     rl.draw_rectangle_rounded(body, 0.35, 6, rgba(INK, 0.92 * alpha))
-    screen = rl.Rectangle(cx - 3, cy - 6, 6, 10)
+    screen = rl.Rectangle(cx - 3 * g, cy - 6 * g, 6 * g, 10 * g)
     rl.draw_rectangle_rounded(screen, 0.2, 4, rgba(WHITE, 0.85 * alpha))
 
   @staticmethod
   def _draw_closed_eye_glyph(cx: float, cy: float, alpha: float) -> None:
+    g = GLYPH_SCALE
     color = rgba(INK, 0.92 * alpha)
-    draw_arc(rl.Vector2(cx, cy - 5.5), 8.5, 2.6, 28, 152, color, round_caps=True)
+    draw_arc(rl.Vector2(cx, cy - 5.5 * g), 8.5 * g, 2.6 * g, 28, 152, color, round_caps=True)
     for angle in (50, 90, 130):
       rad = math.radians(angle)
-      start = rl.Vector2(cx + 8.5 * math.cos(rad), cy - 5.5 + 8.5 * math.sin(rad))
-      end = rl.Vector2(cx + 12.5 * math.cos(rad), cy - 5.5 + 12.5 * math.sin(rad))
-      rl.draw_line_ex(start, end, 2.0, color)
+      start = rl.Vector2(cx + 8.5 * g * math.cos(rad), cy - 5.5 * g + 8.5 * g * math.sin(rad))
+      end = rl.Vector2(cx + 12.5 * g * math.cos(rad), cy - 5.5 * g + 12.5 * g * math.sin(rad))
+      rl.draw_line_ex(start, end, 2.0 * g, color)
 
-  def _draw_readout(self, x: float, cy: float, direction: float, alpha: float) -> None:
-    """Attention left, beside the icon. While a chip is up it shows how close the driver is to an alert."""
+  def _draw_attention_ring(self, center: rl.Vector2, alpha: float) -> None:
+    """Attention as a ring around the driver monitoring icon, no text: it empties and turns red as an alert gets closer."""
     percent = max(0, min(100, self._awareness))
     color = awareness_color(percent)
-    value = f"{percent}%"
-    value_size, caption_size = 26.0, 13.0
-    caption = tr("ATTENTION")
-    value_sz = measure_text_cached(self._font_bold, value, int(value_size))
-    caption_sz = measure_text_cached(self._font_semi_bold, caption, int(caption_size), 1.0)
-    w = max(value_sz.x, caption_sz.x) + 24
-    left = x if direction > 0 else x - w
-    box = rl.Rectangle(left, cy - READOUT_HEIGHT / 2, w, READOUT_HEIGHT)
-    round_box = roundness(10.0, w, READOUT_HEIGHT)
-    rl.draw_rectangle_rounded(box, round_box, 16, rgba(BLACK, 0.62 * alpha))
-    rl.draw_rectangle_rounded_lines_ex(box, round_box, 16, 1.5, rgba(WHITE, 0.28 * alpha))
-    draw_text_centered(self._font_semi_bold, caption, caption_size, left + w / 2, box.y + 11, rgba(WHITE, 0.7 * alpha), spacing=1.0)
-    draw_text_centered(self._font_bold, value, value_size, left + w / 2, box.y + 29, rgba(color, alpha))
+    radius = BTN_SIZE / 2 + RING_GAP + RING_WIDTH / 2
+    draw_arc(center, radius, RING_WIDTH, -90, 270, rgba(color, 0.3 * alpha))  # an empty ring still shows red
+    if percent > 0:
+      draw_arc(center, radius, RING_WIDTH, -90, -90 + 360 * percent / 100, rgba(color, alpha), round_caps=True)
