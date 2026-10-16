@@ -4,16 +4,22 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+from unittest import mock
+
 import numpy as np
+import pyray as rl
 
 from openpilot.cereal import custom, messaging
 from openpilot.common.parameterized import parameterized
 from openpilot.common.test import OpenpilotTestCase
+from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import scope_rect
+from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import CONFIRM_FRAMES, GO_CONFIRM, LEAD_LOST_TIME, RELEASE_TIME, \
   SHOW_CLEARED, SHOW_GO, DetectionEvent, DetectionFeed, EventDetector, EventKind, StopDetector, StopPhase, predicted_stop_distance, \
   stop_is_for_car
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.disengage_meter import PANEL_WIDTH as RISK_WIDTH
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import X_FROM_CENTER, age_text, clock, event_detail, \
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import TURN_SIGNAL_CLEARANCE, age_text, column, clock, event_detail, \
   planner_follows_model
 
 DT = 0.05
@@ -249,9 +255,23 @@ class TestStopIndicatorHelpers(OpenpilotTestCase):
     assert event_detail(curve, is_metric=True) == "0.21 g • 85 m"
     assert event_detail(DetectionEvent(EventKind.HARD_BRAKE, 0.0, 0.0), is_metric=True) == ""
 
-  def test_card_clears_the_risk_meter(self):
-    # both sit under the speed: the risk meter centered, the card's column starting right of center
-    assert RISK_WIDTH / 2 + 10 <= X_FROM_CENTER
+  @parameterized.expand([(m, scope, fuel) for m in (False, True) for scope in (False, True) for fuel in (False, True)])
+  def test_column_sits_between_the_speed_limit_sign_and_the_left_turn_signal(self, is_metric, radar_scope, rocket_fuel):
+    hud = rl.Rectangle(0, 0, 2160, 1080)
+    with mock.patch.object(ui_state, "is_metric", is_metric), mock.patch.object(ui_state, "radar_scope", radar_scope), \
+         mock.patch.object(ui_state, "rocket_fuel", rocket_fuel):
+      x, w = column(hud)
+    sign_w = UI_CONFIG.set_speed_width_metric if is_metric else UI_CONFIG.set_speed_width_imperial
+    sign_right = 60 + 30 - 6 + 2 * sign_w + (9 if is_metric else 0)
+    assert x >= sign_right + 20  # clear of the speed limit sign (and the round metric sign's overhang)
+    center = hud.width / 2
+    assert x + w <= center - (80 + 150) - 10  # clear of the left turn signal
+    assert x + w <= center - RISK_WIDTH / 2 - 10  # and of the risk meter centered under the speed
+    if radar_scope:
+      scope = scope_rect(hud, rocket_fuel)
+      assert x >= scope.x + scope.width + 20
+    assert w >= 260
+    assert TURN_SIGNAL_CLEARANCE >= 80 + 150
 
   @parameterized.expand([(0.0, "<1m"), (59.9, "<1m"), (60.0, "1m"), (59 * 60 + 59, "59m"), (3600.0, "1h+"), (5 * 3600.0, "1h+")])
   def test_age_text_is_in_whole_minutes(self, seconds, expected):

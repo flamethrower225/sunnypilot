@@ -19,7 +19,7 @@ from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 
 # one compact row so it covers as little of the road as possible: dot, RISK, total %, then the cells near to far
-PANEL_WIDTH = 450.0     # clear of the stop card, which starts 240 px right of center
+PANEL_WIDTH = 450.0     # clear of the stop card column, which ends 250 px left of center
 PANEL_HEIGHT = 60.0
 PANEL_TOP = 328.0       # from the top of the HUD content rect, just under the speed unit
 PANEL_RADIUS = 18.0
