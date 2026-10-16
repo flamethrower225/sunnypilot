@@ -79,7 +79,7 @@ class SmartCruiseControlRenderer(Widget):
       rl.draw_text_ex(self.font, text, rl.Vector2(text_pos_x, text_pos_y), font_size, 0, text_color)
 
   def _render(self, rect: rl.Rectangle):
-    x_offset = -260
+    x_offset = 260  # right of the speed: the left side holds the stop card and detection log
     y1_offset = -40
     y2_offset = -100
 

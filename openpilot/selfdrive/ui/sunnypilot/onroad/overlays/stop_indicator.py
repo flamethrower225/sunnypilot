@@ -15,7 +15,8 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK
   draw_text_centered, draw_triangle, draw_value_with_unit, measure_value_with_unit, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import FT_PER_M, GapZone
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import DetectionEvent, EventKind, StopPhase, get_detection_feed
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.threat_board import board_rect
+from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import scope_rect
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr, tr_noop
@@ -29,12 +30,14 @@ GO_RGB = ZONE_RGB[GapZone.GOOD]
 WARN_RGB = ZONE_RGB[GapZone.CAUTION]
 MUTED_RGB = ZONE_RGB[GapZone.NONE]
 
-# right of the speed, clear of the turn signal, the wheel button and the threat board
-X_FROM_CENTER = 240
+# left of the speed, just right of the speed limit sign and clear of the left turn signal
+SIGN_LEFT = 60 + 30 - 6  # the speed limit sign sits this far right of the MAX box, which starts 60 px in (speed_limit.py)
+VIENNA_OVERHANG = 9      # the round metric sign is 18 px wider than its box
+SIGN_GAP = 24
+TURN_SIGNAL_CLEARANCE = 250  # from the center: the left turn signal starts 80 + 150 px left of it, plus a gap
 TOP = 40
+MIN_WIDTH = 260
 MAX_WIDTH = 420
-WHEEL_CLEARANCE = 270
-THREAT_BOARD_GAP = 20
 PAD = 22
 ICON_R = 34
 PULSE_TIME = 0.8  # s
@@ -55,13 +58,15 @@ STOPPED_SPEED = 0.5      # m/s, below this the log shows its full list
 
 
 def column(rect: rl.Rectangle) -> tuple[float, float]:
-  """x and width of the column the card and the log share."""
-  x = rect.x + rect.width / 2 + X_FROM_CENTER
-  if ui_state.threat_board:
-    right = board_rect(rect, ui_state.developer_ui, 0.0).x - THREAT_BOARD_GAP
-  else:
-    right = rect.x + rect.width - WHEEL_CLEARANCE
-  return x, max(260.0, min(MAX_WIDTH, right - x))
+  """x and width of the column the card and the log share: right of the speed limit sign, left of the left turn signal."""
+  sign_w = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
+  sign_right = rect.x + SIGN_LEFT + 2 * sign_w + (VIENNA_OVERHANG if ui_state.is_metric else 0)
+  x = sign_right + SIGN_GAP
+  if ui_state.radar_scope:  # the scope sits under the sign and grows right when the rocket fuel bar takes the left edge
+    scope = scope_rect(rect, ui_state.rocket_fuel)
+    x = max(x, scope.x + scope.width + SIGN_GAP)
+  right = rect.x + rect.width / 2 - TURN_SIGNAL_CLEARANCE
+  return x, max(MIN_WIDTH, min(MAX_WIDTH, right - x))
 
 
 def format_distance(meters: float, is_metric: bool) -> tuple[str, str]:
