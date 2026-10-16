@@ -157,35 +157,40 @@ class MsgStats:
     return {s + i for s, sz in self.counters for i in range(sz)} | {b * 8 + i for b in self.checksum_bytes for i in range(8)}
 
 
-def _find_counters(history: list[bytes]) -> list[tuple[int, int]]:
-  """Fields that step by +1 (wrapping) in nearly every frame. Checks 2-8 bit fields at every position."""
-  if len(history) < 8:
+def _find_counters(v: np.ndarray) -> list[tuple[int, int]]:
+  """Fields that step by +1 (wrapping) in nearly every frame. Checks 2-8 bit fields at every position.
+  A counter's lowest bit flips on every step, so only positions whose bit flips nearly every frame are tried."""
+  n = len(v)
+  if n < 8:
     return []
+  bits = np.unpackbits(v.view(np.uint8).reshape(-1, 8), axis=1, bitorder="little")
+  flips = (bits[1:] != bits[:-1]).mean(axis=0)
   found: list[tuple[int, int]] = []
   for size in (8, 4, 3, 2):
     mod = 1 << size
-    for start in range(64 - size + 1):
-      if any(start < s + sz and s < start + size for s, sz in found):
+    for start in map(int, np.flatnonzero(flips >= 0.9)):
+      if start + size > 64 or any(start < s + sz and s < start + size for s, sz in found):
         continue
-      vals = [sum(bit(d, start + i) << i for i in range(size)) for d in history]
-      steps = sum((b - a) % mod == 1 for a, b in zip(vals, vals[1:], strict=False))
-      if steps >= 0.9 * (len(vals) - 1) and len(set(vals)) == min(mod, len(vals)):
+      vals = ((v >> np.uint64(start)) & np.uint64(mod - 1)).astype(np.int64)
+      steps = int((np.diff(vals) % mod == 1).sum())
+      if steps >= 0.9 * (n - 1) and len(np.unique(vals)) == min(mod, n):
         found.append((start, size))
   return sorted(found)
 
 
-def _find_checksum_bytes(history: list[bytes], counters: list[tuple[int, int]]) -> list[int]:
+def _find_checksum_bytes(v: np.ndarray, counters: list[tuple[int, int]]) -> list[int]:
   """Whole bytes that change in almost every frame and take many values but are not counters."""
-  if len(history) < 8:
+  n = len(v)
+  if n < 8:
     return []
   counter_bits = {s + i for s, sz in counters for i in range(sz)}
   out = []
   for byte in range(8):
     if set(range(byte * 8, byte * 8 + 8)) <= counter_bits:
       continue
-    vals = [d[byte] for d in history]
-    changes = sum(a != b for a, b in zip(vals, vals[1:], strict=False))
-    if changes >= 0.8 * (len(vals) - 1) and len(set(vals)) >= min(32, len(vals) // 2):
+    vals = (v >> np.uint64(8 * byte)) & np.uint64(0xFF)
+    changes = int((np.diff(vals.astype(np.int64)) != 0).sum())
+    if changes >= 0.8 * (n - 1) and len(np.unique(vals)) >= min(32, n // 2):
       out.append(byte)
   return out
 
@@ -197,7 +202,7 @@ def inventory(series: dict[tuple[int, int], Series], history_len: int = 200) -> 
     dt = (s.t[-1] - s.t[0]) / 1e9 if n > 1 else 0.0
     bits = s.bits()
     toggles = (bits[1:] != bits[:-1]).sum(axis=0) if n > 1 else np.zeros(64, dtype=np.int64)
-    history = s.raw(history_len)
+    history = s.v[:history_len]
     counters = _find_counters(history)
     stats[(bus, addr)] = MsgStats(bus, addr, n, (n - 1) / dt if dt > 0 else 0.0, s.lengths, toggles, counters,
                                   _find_checksum_bytes(history, counters))

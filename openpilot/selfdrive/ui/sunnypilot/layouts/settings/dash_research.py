@@ -7,7 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 import time
 
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.sunnypilot.tools.dash_re.engine import MARK_LABELS, findings_html, results_html
+from openpilot.sunnypilot.tools.dash_re.engine import MARK_LABELS, events_html, findings_html, results_html
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets import DialogResult
@@ -36,14 +36,17 @@ class DashResearchItems:
                                 callback=self._show_mark_dialog)
     self.results_btn = button_item(tr("Dash Action Results"), tr("VIEW"), tr("The bits that changed after each marked action."),
                                    callback=self._show_results)
+    self.events_btn = button_item(tr("Dash Event Log"), tr("VIEW"),
+                                  tr("Every rarely-changing bit that flipped while the car was on, with the time, so actions " +
+                                     "you did not mark still show up."), callback=self._show_events)
     self.reset_btn = button_item(tr("Reset Dash Research"), tr("RESET"), tr("Delete the saved findings and action results."),
                                  callback=self._confirm_reset)
 
-    self.items: list = [self.toggle, self.findings_btn, self.mark_btn, self.results_btn, self.reset_btn]
+    self.items: list = [self.toggle, self.findings_btn, self.mark_btn, self.results_btn, self.events_btn, self.reset_btn]
 
   def update_state(self) -> None:
     enabled = ui_state.params.get_bool("DashReEnabled")
-    for item in (self.findings_btn, self.mark_btn, self.results_btn, self.reset_btn):
+    for item in (self.findings_btn, self.mark_btn, self.results_btn, self.events_btn, self.reset_btn):
       item.set_visible(enabled)
     self.mark_btn.action_item.set_enabled(ui_state.started)
 
@@ -54,6 +57,10 @@ class DashResearchItems:
   @staticmethod
   def _show_results():
     gui_app.push_widget(HtmlModalSP(text=results_html(ui_state.params.get("DashReResults"))))
+
+  @staticmethod
+  def _show_events():
+    gui_app.push_widget(HtmlModalSP(text=events_html(ui_state.params.get("DashReFindings"))))
 
   def _show_mark_dialog(self):
     def on_select(result: DialogResult):

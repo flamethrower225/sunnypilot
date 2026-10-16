@@ -1,4 +1,6 @@
-from openpilot.sunnypilot.tools.dash_re.engine import DashReEngine, findings_html, results_html
+import random
+
+from openpilot.sunnypilot.tools.dash_re.engine import DashReEngine, events_html, findings_html, results_html
 
 NS = 1_000_000_000
 CGW1, CLU11, LKAS12, DATC11, UNKNOWN_CAM, TP_HU_CARPLAY_CLU = 0x541, 0x4F1, 0x53E, 0x44, 0x5F0, 0x4F2
@@ -87,3 +89,68 @@ def test_html_empty_states_and_escaping():
   assert "No marked actions yet" in results_html([])
   html = results_html([{"label": "<script>", "time": "t", "total": 0, "changes": []}])
   assert "<script>" not in html and "&lt;script&gt;" in html
+
+
+def detector_drive(e: DashReEngine, seconds: float = 40., hz: int = 50) -> None:
+  rng = random.Random(0)
+  next_irregular = 0.
+  for i in range(int(seconds * hz)):
+    s = i / hz
+    t = int(s * NS)
+    e.ingest(t, 0, CLU11, bytes([0, 0, 0, (i % 16) << 4]))
+    e.ingest(t, 0, CGW1, bytes([0, 0, (1 << 3) if s >= 20 else 0, 0, 0, 0, 0, 0]))  # signal on at 20 s
+    # LKAS12 sent 8 long (DBC says 6), bit 0 toggles every second: no DBC signal covers it
+    e.ingest(t, 2, LKAS12, bytes([(i // 50) % 2, 0, 65, 0, 0, 0, 0, 0]))
+    e.ingest(t, 0, 0x5F1, bytes(rng.getrandbits(8) for _ in range(8)))  # random binary: must not read as text
+    if i % 10 == 0:
+      e.ingest(t, 0, 0x5F2, b"Main St\0")  # plain single-frame text, resent
+    if s >= 15:
+      e.ingest(t, 0, 0x5F3, bytes(8))  # switched on at 15 s
+    if s < 10:
+      e.ingest(t, 0, 0x5F4, bytes(8))  # stops at 10 s
+    if s >= next_irregular:
+      e.ingest(t, 0, 0x5F5, bytes(8))  # sent on change: irregular gaps
+      next_irregular = s + rng.choice([0.02, 0.02, 0.02, 1.5, 3.0])
+
+
+def test_detectors():
+  e = DashReEngine()
+  detector_drive(e)
+  f = e.findings()
+
+  # rare-bit event log caught the turn signal, and nothing from counters, the toggling bit or random noise
+  (ev,) = [x for x in f["events"] if x["addr"] == CGW1]
+  assert (ev["bit"], ev["value"], ev["signal"], ev["dash"]) == (TURN_SIG_LH_BIT, 1, "CF_Gway_TurnSigLh", True)
+  assert not [x for x in f["events"] if x["addr"] in (CLU11, 0x5F1)]
+  assert "CF_Gway_TurnSigLh" in events_html(f)
+
+  text = {r["addr"]: r["samples"] for r in f["text"]}
+  assert text == {0x5F2: ["Main St"]}
+
+  assert [r["addr"] for r in f["late"]] == [0x5F3] and f["late"][0]["first_s"] == 15
+  assert [r["addr"] for r in f["stopped"]] == [0x5F4]
+  assert 0x5F5 in [r["addr"] for r in f["irregular"]]
+  assert not {CLU11, CGW1, 0x5F1} & {r["addr"] for r in f["irregular"]}
+
+  assert {0x5F1, 0x5F2, 0x5F3, 0x5F4, 0x5F5} <= {r["addr"] for r in f["unknown"]}
+  assert [(r["name"], r["dbc_len"], r["seen"]) for r in f["length_mismatch"]] == [("LKAS12", 6, [8])]
+  assert [(r["name"], r["bits"]) for r in f["undocumented"]] == [("LKAS12", [0])]
+
+  html = findings_html(f)
+  for snippet in ("Main St", "first seen at 15 s", "silent for", "DBC 6 bytes, seen [8]", "LKAS12 on bus 2: bits 0"):
+    assert snippet in html
+
+
+def test_mark_reports_messages_that_appear():
+  e = DashReEngine()
+  for i in range(400):  # 8 s at 50 Hz, a new message starts right after the mark at 3 s
+    t = int(i / 50 * NS)
+    e.ingest(t, 0, CLU11, bytes([0, 0, 0, (i % 16) << 4]))
+    if i >= 165:
+      e.ingest(t, 0, 0x5F3, bytes(8))
+    if i == 150:
+      e.mark("Media: next track", t)
+  (r,) = e.process_marks()
+  (tr,) = r["traffic"]
+  assert (tr["addr"], tr["kind"], tr["hz_before"]) == (0x5F3, "appeared", 0.0)
+  assert "appeared" in results_html([r])

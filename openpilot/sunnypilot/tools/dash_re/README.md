@@ -6,19 +6,35 @@ can change on it. Everything here only listens to CAN; nothing transmits.
 ## On the device, no SSH needed
 
 Settings → Developer → **Dash Research** turns on `dashred`, a background service that runs while the car is
-on. It writes its findings to params every few seconds, and they stay there after the car is off.
+on. It writes its findings to params every 10 seconds, and they stay there after the car is off.
 
-- **Dash Research Findings** shows what the service has found:
-  - **Free text check:** multi-frame (ISO-TP) traffic outside diagnostics, which is the shape text takes, plus
-    any head unit → cluster (M-CAN) IDs that reach the buses the harness sees
+- **Dash Research Findings** shows what the service has found, most likely to be new first:
+  - **Free text check:**
+    - multi-frame (ISO-TP) traffic outside diagnostics, which is the shape text takes
+    - head unit → cluster (M-CAN) IDs that reach the buses the harness sees
+    - readable text inside payloads: ASCII or UTF-16, in single frames (it must repeat, so random bytes don't
+      count) or reassembled from multi-frame messages
+  - **Messages in no DBC:** IDs neither Hyundai DBC knows, with rate and how many bits change
+  - **Undocumented bits on dash messages:** bits that change on messages the cluster reads or the camera sends,
+    that no DBC signal explains (counters and checksums excluded)
+  - **Event-driven messages:**
+    - IDs that appeared after listening started
+    - IDs that stopped while other traffic continued
+    - IDs with irregular timing, meaning sent on change rather than on a schedule. Head-unit and button
+      messages often behave this way.
   - **Camera-only messages:** substitutable with a safety change. Any missing from the DBC are flagged.
   - **Bus 1 contents**
-  - **Orphans:** cluster inputs no ECU sends on this car, after 30 s of listening
+  - **Length differs from the DBC:** a sign the DBC layout is wrong for this car
   - **Presence checks:** `Navi_HU`, `LKAS12` and the climate messages
+  - **Orphans:** cluster inputs no ECU sends on this car, after 30 s of listening
 - **Mark Dash Action** (car on, parked): pick what you're about to do, tap Select, and do it within a second.
   The service compares the 2 s before with the 3.5 s after.
-- **Dash Action Results** lists the bits that changed for each mark. `[CLU]` marks a signal the cluster reads.
-  Counter and checksum bits are filtered out.
+- **Dash Action Results** lists, for each mark:
+  - the bits that changed. `[CLU]` marks a signal the cluster reads. Counter and checksum bits are filtered out.
+  - messages that started, stopped or changed rate around the action. These catch event messages that carry
+    no steady bits.
+- **Dash Event Log** records every rarely-changing bit the moment it flips, with the time. Actions you didn't
+  mark still show up. Bits that flip more than 6 times count as noise and are dropped automatically.
 
 Start with the two turn-signal reference marks. Each should report `CGW1` bit 19 (`CF_Gway_TurnSigLh`), which
 confirms the timing works before you trust the other results.

@@ -20,7 +20,7 @@ from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.tools.dash_re.engine import DashReEngine
 
-FINDINGS_PERIOD_S = 5.
+FINDINGS_PERIOD_S = 10.
 MARK_POLL_S = 0.25
 
 
