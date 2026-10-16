@@ -33,8 +33,8 @@ class VCruiseHelper(VCruiseHelperSP):
   def __init__(self, CP, CP_SP):
     VCruiseHelperSP.__init__(self, CP, CP_SP)
     self.CP = CP
-    self.v_cruise_kph = V_CRUISE_UNSET
-    self.v_cruise_cluster_kph = V_CRUISE_UNSET
+    self.v_cruise_kph: float = V_CRUISE_UNSET
+    self.v_cruise_cluster_kph: float = V_CRUISE_UNSET
     self.v_cruise_kph_last = 0
     self.button_timers = {ButtonType.decelCruise: 0, ButtonType.accelCruise: 0}
     self.button_change_states = {btn: {"standstill": False, "enabled": False} for btn in self.button_timers}
@@ -148,6 +148,8 @@ class VCruiseHelper(VCruiseHelperSP):
 
     if any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) and self.v_cruise_initialized:
       self.v_cruise_kph = self.v_cruise_kph_last
+    elif (sla_initial := self.get_speed_limit_assist_initial_v_cruise()) is not None:
+      self.v_cruise_kph = sla_initial
     else:
       self.v_cruise_kph = int(round(np.clip(CS.vEgo * CV.MS_TO_KPH, initial, V_CRUISE_MAX)))
 
