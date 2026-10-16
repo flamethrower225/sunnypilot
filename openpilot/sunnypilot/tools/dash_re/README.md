@@ -3,6 +3,26 @@
 Tools and a plan for working out what drives the 2021–23 Elantra (CN7) instrument cluster, and what openpilot
 can change on it. Everything here only listens to CAN; nothing transmits.
 
+## On the device, no SSH needed
+
+Settings → Developer → **Dash Research** turns on `dashred`, a background service that runs while the car is
+on. It writes its findings to params every few seconds, and they stay there after the car is off.
+
+- **Dash Research Findings** shows what the service has found:
+  - **Free text check:** multi-frame (ISO-TP) traffic outside diagnostics, which is the shape text takes, plus
+    any head unit → cluster (M-CAN) IDs that reach the buses the harness sees
+  - **Camera-only messages:** substitutable with a safety change. Any missing from the DBC are flagged.
+  - **Bus 1 contents**
+  - **Orphans:** cluster inputs no ECU sends on this car, after 30 s of listening
+  - **Presence checks:** `Navi_HU`, `LKAS12` and the climate messages
+- **Mark Dash Action** (car on, parked): pick what you're about to do, tap Select, and do it within a second.
+  The service compares the 2 s before with the 3.5 s after.
+- **Dash Action Results** lists the bits that changed for each mark. `[CLU]` marks a signal the cluster reads.
+  Counter and checksum bits are filtered out.
+
+Start with the two turn-signal reference marks. Each should report `CGW1` bit 19 (`CF_Gway_TurnSigLh`), which
+confirms the timing works before you trust the other results.
+
 ## How to narrow the search
 
 The car has hundreds of messages. Four filters cut that down to a short list before you record anything:

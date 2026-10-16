@@ -220,6 +220,7 @@ class BitChange:
   before: str  # "0", "1" or "toggling"
   after: str
   score: float
+  ones_after: float = 0.  # share of frames with the bit set in the after window
 
 
 def _describe(frac: float) -> str:
@@ -244,7 +245,7 @@ def diff_windows(series: dict[tuple[int, int], Series], before: tuple[int, int],
       db, da = _describe(fb[b]), _describe(fa[b])
       if db != da:
         score = float(abs(fa[b] - fb[b])) if "toggling" in (db, da) else 1.0
-        out.append(BitChange(key[0], key[1], int(b), db, da, round(score, 3)))
+        out.append(BitChange(key[0], key[1], int(b), db, da, round(score, 3), round(float(fa[b]), 2)))
   return sorted(out, key=lambda c: (-c.score, c.bus, c.addr, c.bit))
 
 
