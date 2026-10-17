@@ -15,7 +15,6 @@ import re
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from html import escape
 
 from openpilot.sunnypilot.tools.dash_re import analysis
 from openpilot.sunnypilot.tools.dash_re.analysis import Frame, Marker
@@ -40,9 +39,10 @@ EVENT_WARMUP_S = 3.  # ignore a message's first seconds, when every bit looks ne
 MAX_EVENTS = 80
 
 # text scan: printable runs inside a single payload (ASCII or UTF-16LE), and reassembled ISO-TP payloads
-TEXT_ASCII = re.compile(rb"[\x20-\x7e]{5,}")
+TEXT_ASCII = re.compile(rb"[\x20-\x7e]{6,}")
 TEXT_UTF16 = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
 TEXT_MIN_REPEATS = 3
+TEXT_MAX_HZ = 20.  # text gets sent on change or slowly; a printable run in a faster control message is a coincidence
 ISOTP_SHAPE_MIN = 0.9  # a transport channel formats every frame; ordinary data only looks like it by chance (~20%)
 ISOTP_MIN_FRAMES = 20  # text gets resent; random bytes that happen to look printable rarely repeat
 MAX_TEXT_SAMPLES = 24
@@ -79,9 +79,9 @@ MARK_LABELS = [
 
 
 def _text_runs(dat: bytes) -> list[str]:
-  """Printable runs that look like words: at least 3 letters and 3 different characters."""
+  """Printable runs that look like words: at least 4 letters and 3 different characters."""
   out = [m.decode("ascii") for m in TEXT_ASCII.findall(dat)] + [m.decode("utf-16-le") for m in TEXT_UTF16.findall(dat)]
-  return [t.strip() for t in out if sum(c.isalpha() for c in t) >= 3 and len(set(t)) >= 3]
+  return [t.strip() for t in out if sum(c.isalpha() for c in t) >= 4 and len(set(t)) >= 3]
 
 
 @dataclass
@@ -334,7 +334,10 @@ class DashReEngine:
                   for (b, a) in keys if (st := self.stats[(b, a)]).isotp_pairs >= 2 and self.isotp_shaped(st)]
     text = []
     for (b, a) in keys:
-      samples = [t for t, n in self.stats[(b, a)].texts.most_common() if n >= TEXT_MIN_REPEATS][:4]
+      st = self.stats[(b, a)]
+      if not self.isotp_shaped(st) and self._hz(st) > TEXT_MAX_HZ:
+        continue  # e.g. LKAS11 at 100 Hz, whose bytes sometimes read "DFAM<"
+      samples = [t for t, n in st.texts.most_common() if n >= TEXT_MIN_REPEATS][:4]
       if samples:
         text.append({"addr": a, "bus": b, "name": self._name(a), "samples": samples})
 
@@ -358,6 +361,11 @@ class DashReEngine:
             "mcan_seen": mcan_seen, "isotp_like": isotp_like, "text": text, "unknown": unknown, "late": late, "stopped": stopped,
             "irregular": irregular, "length_mismatch": length_mismatch, "undocumented": self._undocumented(), "checks": checks,
             "events": list(self.events)}
+
+
+def escape(text: str) -> str:
+  """The settings viewer parses < as a tag and shows entities literally, so swap in look-alike characters."""
+  return str(text).replace("&", "＆").replace("<", "‹").replace(">", "›")
 
 
 def _clock() -> str:

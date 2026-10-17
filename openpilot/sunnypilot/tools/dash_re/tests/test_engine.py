@@ -88,7 +88,7 @@ def test_html_empty_states_and_escaping():
   assert "No findings yet" in findings_html(None)
   assert "No marked actions yet" in results_html([])
   html = results_html([{"label": "<script>", "time": "t", "total": 0, "changes": []}])
-  assert "<script>" not in html and "&lt;script&gt;" in html
+  assert "<script>" not in html and "‹script›" in html and "&lt;" not in html
 
 
 def detector_drive(e: DashReEngine, seconds: float = 40., hz: int = 50) -> None:
@@ -183,3 +183,14 @@ def test_real_transport_channel_text_is_found_and_described():
   assert f["checks"]["TP_HU_NAVI_CLU (0x49B) head unit to cluster navigation"] == [0]
   html = findings_html(f)
   assert "formatted as a transport channel" in html and "0x49B, head unit to cluster navigation: bus 0" in html
+
+
+def test_fast_control_messages_with_printable_bytes_are_not_text():
+  # like LKAS11 at 100 Hz on the Elantra, whose bytes read "DFAM<", "DVAU<", ... with a counter in them
+  e = DashReEngine()
+  for i in range(3000):
+    e.ingest(int(i / 100 * NS), 2, 0x340, bytes([0x44, 0x46 + (i % 2) * 0x10, 0x41, 0x4D, 0x3C, 0x20, 0x41, i % 16]))
+    if i % 50 == 0:  # slow, resent text on another ID still counts
+      e.ingest(int(i / 100 * NS), 0, 0x5F2, b"Main St\0")
+  f = e.findings()
+  assert {r["addr"]: r["samples"] for r in f["text"]} == {0x5F2: ["Main St"]}
