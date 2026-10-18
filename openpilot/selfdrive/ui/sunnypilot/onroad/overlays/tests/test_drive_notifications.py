@@ -11,6 +11,7 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays import drive_notifications as dn
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.drive_notifications import BREAK_AFTER, DriveSnapshot, Icon, NotificationEngine, \
   NotifyKind, adjacent_lanes, curve_decel_needed
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.tests.test_ar_overlays import next_sm_time
 
 MPH = CV.MPH_TO_MS
 DT = 0.05
@@ -181,7 +182,7 @@ def highway_msgs(left_blindspot=False, blinker=False):
   return list(msgs.values())
 
 
-_sm_clock = [5000.0]  # the SubMaster's frequency tracker needs time to only move forward, across tests too
+_sm_clock = [0.0]
 
 
 class TestOverlay(OpenpilotTestCase):
@@ -197,7 +198,7 @@ class TestOverlay(OpenpilotTestCase):
       overlay = dn.DriveNotifications()
       for i in range(int(seconds / DT)):
         mono.return_value = 1000.0 + i * DT
-        _sm_clock[0] += DT
+        _sm_clock[0] = next_sm_time(DT)
         ui_state.sm.update_msgs(_sm_clock[0], highway_msgs(**kw))
         overlay.update()
       return overlay, detection.get_detection_feed().log

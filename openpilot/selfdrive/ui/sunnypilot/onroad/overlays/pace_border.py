@@ -9,7 +9,8 @@ Pace Border: a glow around the screen edge that tells the driver, without readin
 Each frame it works out the deceleration needed to settle at the gap the longitudinal planner targets behind the lead, the
 deceleration needed to stop just short of a planned stop (a light or sign, from the stop detector), and the deceleration needed to
 be at a bend's advisory speed before its tightest point (the curve preview's speed), and with Camera Object Detection on, the
-deceleration needed to stop for a red light (or a yellow there is room to stop for). The largest of them, minus
+deceleration needed to stop for a red light (or a yellow there is room to stop for), a stop sign or a flashing red. A sign or flashing
+red stops asking once the car has stopped at it, so pulling away after the stop is quiet. The largest of them, minus
 the deceleration the car already has, is the shortfall. No shortfall, no border. As it grows the glow turns yellow, then orange,
 then red, flashes faster and reaches further into the screen. When stopped and it is time to go, the edge pulses green.
 
@@ -37,7 +38,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.curve_hologram import cur
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import StopPhase, get_detection_feed
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.edge_glow import draw_edge_glow
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.follow_ghost import desired_gap
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import current_light
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import current_light, current_stop_sign
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import update_feed
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
@@ -51,8 +52,9 @@ SHORTFALL_FULL = 3.5       # m/s^2 at which it is at full strength
 MIN_SPEED = 1.0            # m/s, below this there is nothing to slow for
 LIGHT_RED, LIGHT_YELLOW, LIGHT_GREEN = 1, 2, 3   # SceneDetectionSP.LightState
 GREEN_FRESH = 2.0          # s, a light that turned green this recently pulses the edge green while stopped
-LIGHT_SETBACK = 10.0       # m, the stop line is about this far before the light
 YELLOW_STOP_DECEL = 3.0    # m/s^2, a yellow that needs more than this to stop for is left out
+SERVED_SPEED = 0.5         # m/s, stopped this slowly ...
+SERVED_RANGE = 15.0        # m, ... this close to a stop sign or flashing red, it has been served
 
 FLASH_HZ = (0.8, 4.5)      # flashes per second at the lowest and highest urgency
 DEPTH_PX = (60.0, 160.0)   # how far the glow reaches into the screen
@@ -152,7 +154,17 @@ class PaceBorder:
     self._last = time.monotonic()
     self._go_until = 0.0
     self._go_prev = False
-    self.reason = ""  # "lead", "stop", "light" or "curve", for tests and debugging
+    self._served = False  # stopped at the stop sign or flashing red ahead: it asks nothing more until it is gone
+    self.reason = ""  # "lead", "stop", "light", "sign" or "curve", for tests and debugging
+
+  @staticmethod
+  def _full_stop(sm) -> float | None:
+    """Where the stop sign or flashing red ahead wants a full stop, m: they are stopped at and then driven through."""
+    light = current_light(sm)
+    if light is not None and light.flashing and light.state == LIGHT_RED:
+      return light.stop_at
+    sign = current_stop_sign(sm)
+    return sign.stop_distance if sign is not None else None
 
   def _demand(self) -> tuple[float, str]:
     sm = ui_state.sm
@@ -171,13 +183,20 @@ class PaceBorder:
       d = stop_demand(stop.stop_x, v_ego)
       if d > best:
         best, reason = d, "stop"
+    def ahead_of_lead(stop_x: float) -> bool:
+      return math.isfinite(stop_x) and not (radar_ok and lead.present and lead.dRel < stop_x)
+
     light = current_light(sm)
-    if light is not None and light.state in (LIGHT_RED, LIGHT_YELLOW) and math.isfinite(light.distance) and \
-       not (radar_ok and lead.present and lead.dRel < light.distance):
-      d = stop_demand(max(light.distance - LIGHT_SETBACK, 0.0), v_ego)
+    if light is not None and not light.flashing and light.state in (LIGHT_RED, LIGHT_YELLOW) and ahead_of_lead(light.stop_at):
+      d = stop_demand(light.stop_at, v_ego)
       # a yellow you can't stop for gently is one to go through, not to brake hard for
       if d > best and (light.state == LIGHT_RED or d <= YELLOW_STOP_DECEL):
         best, reason = d, "light"
+    full_stop = self._full_stop(sm)
+    if full_stop is not None and not self._served and ahead_of_lead(full_stop):
+      d = stop_demand(full_stop, v_ego)
+      if d > best:
+        best, reason = d, "sign"
     curve = curve_ahead(sm, ui_state.started_frame)
     if curve is not None:
       d = curve_decel_needed(v_ego, curve.speed, curve.x)
@@ -190,11 +209,17 @@ class PaceBorder:
     dt, self._last = min(now - self._last, 0.2), now
     if not ui_state.pace_border or not ui_state.started:
       self._urgency.x = 0.0
+      self._served = False
       self._papi_alpha.x = 0.0
       self.papi_shown = False
       self._go_until = 0.0
       return
     update_feed()
+    full_stop = self._full_stop(ui_state.sm)
+    if full_stop is None:
+      self._served = False
+    elif ui_state.sm['carState'].vEgo < SERVED_SPEED and full_stop < SERVED_RANGE:
+      self._served = True
     demand, self.reason = self._demand()
     decel = max(-ui_state.sm['carState'].aEgo, 0.0)
     target = urgency(demand - decel)

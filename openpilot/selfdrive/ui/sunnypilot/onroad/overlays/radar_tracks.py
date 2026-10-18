@@ -9,7 +9,7 @@ Radar track parsing, classification and threat ranking shared by the radar overl
 import itertools
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum, StrEnum
 
 import numpy as np
@@ -64,6 +64,8 @@ class RadarTrack:
   ttc: float        # s, inf unless closing
   lateral_estimated: bool = False  # the radar gave no lateral position, y_rel was filled in (see parse_tracks)
   camera: bool = False             # seen by the cameras (scened), not the radar
+  braking: bool = False            # the cameras see its brake lights on
+  merging: bool = False            # the cameras see it drifting into our lane
 
   @property
   def y_right(self) -> float:
@@ -99,10 +101,10 @@ def time_to_collision(d_rel: float, v_rel: float) -> float:
 
 
 def make_track(track_id: int, d_rel: float, y_rel: float, v_rel: float, v_ego: float, lateral_estimated: bool = False,
-               camera: bool = False) -> RadarTrack:
+               camera: bool = False, braking: bool = False, merging: bool = False) -> RadarTrack:
   v_abs = v_rel + v_ego
   return RadarTrack(int(track_id), d_rel, y_rel, v_rel, v_abs, classify_motion(v_abs), lane_of(y_rel), time_to_collision(d_rel, v_rel),
-                    lateral_estimated, camera)
+                    lateral_estimated, camera, braking, merging)
 
 
 LateralFallback = Callable[[int, float], float]
@@ -226,7 +228,7 @@ class TrackSmoother:
         f[1].update(t.y_rel)
         f[2].update(t.v_rel)
       filters[t.track_id] = f
-      smoothed.append(make_track(t.track_id, f[0].x, f[1].x, f[2].x, v_ego, t.lateral_estimated, t.camera))
+      smoothed.append(make_track(t.track_id, f[0].x, f[1].x, f[2].x, v_ego, t.lateral_estimated, t.camera, t.braking, t.merging))
     self._filters = filters
     return smoothed
 
@@ -274,7 +276,8 @@ class RadarFeed:
 
     raw = parse_tracks(sm['radarTracks'].points, self.v_ego, self._lateral_fallback(sm, started_frame, radar_state)) if tracks_ok else []
     if service_fresh(sm, 'sceneDetectionSP', started_frame):
-      raw += camera_tracks(sm['sceneDetectionSP'].vehicles, raw, radar_state, self.v_ego)
+      vehicles = sm['sceneDetectionSP'].vehicles
+      raw = with_camera_flags(raw, vehicles) + camera_tracks(vehicles, raw, radar_state, self.v_ego)
       self.available = True
     self.tracks = self._smoother.update(raw, self.v_ego)
     self.lead_one, self.lead_two = match_leads(self.tracks, self.lead_ids)
@@ -319,9 +322,27 @@ def camera_tracks(vehicles, radar: list[RadarTrack], radar_state, v_ego: float) 
   for v in vehicles:
     if v.lastSeen > CAMERA_MAX_AGE or not (math.isfinite(v.dRel) and math.isfinite(v.yRel)) or v.dRel <= 0.0:
       continue
-    if any(abs(v.dRel - d) < CAMERA_DUPLICATE[0] and abs(v.yRel - y) < CAMERA_DUPLICATE[1] for d, y in known):
+    if any(same_car(v, d, y) for d, y in known):
       continue
-    out.append(make_track(CAMERA_ID_BASE + int(v.trackId), float(v.dRel), float(v.yRel), float(v.vRel), v_ego, camera=True))
+    out.append(make_track(CAMERA_ID_BASE + int(v.trackId), float(v.dRel), float(v.yRel), float(v.vRel), v_ego, camera=True,
+                          braking=bool(getattr(v, "braking", False)), merging=bool(getattr(v, "merging", False))))
+  return out
+
+
+def same_car(vehicle, d_rel: float, y_rel: float) -> bool:
+  return abs(vehicle.dRel - d_rel) < CAMERA_DUPLICATE[0] and abs(vehicle.yRel - y_rel) < CAMERA_DUPLICATE[1]
+
+
+def with_camera_flags(radar: list[RadarTrack], vehicles) -> list[RadarTrack]:
+  """The radar's tracks, with what only the cameras can see (brake lights, a drift into our lane) carried over from the camera's car
+  at the same spot. The radar keeps the position, the cameras add the flags."""
+  flagged = [v for v in vehicles if v.lastSeen <= CAMERA_MAX_AGE and (getattr(v, "braking", False) or getattr(v, "merging", False))]
+  if not flagged:
+    return radar
+  out = []
+  for t in radar:
+    match = next((v for v in flagged if same_car(v, t.d_rel, t.y_rel)), None)
+    out.append(t if match is None else replace(t, braking=bool(match.braking), merging=bool(match.merging)))
   return out
 
 

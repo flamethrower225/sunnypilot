@@ -48,8 +48,14 @@ def overlay_env(**flags):
 _clock = [0.0]
 
 
+def next_sm_time(step: float) -> float:
+  """A time step past everything the shared SubMaster has received. Several test modules feed it, each on its own clock, and its
+  frequency trackers divide by the average gap between messages, so time must never go backward whichever module ran last."""
+  return max(ui_state.sm.recv_time.values()) + step
+
+
 def feed(**msgs):
-  _clock[0] += DT
+  _clock[0] = next_sm_time(DT)
   ui_state.sm.update_msgs(_clock[0], list(msgs.values()))
 
 

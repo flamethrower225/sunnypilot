@@ -72,10 +72,17 @@ class EventKind(IntEnum):
   RED_LIGHT = 16
   YELLOW_LIGHT = 17
   LIGHT_GREEN = 18
+  PEDESTRIAN = 19
+  MERGING = 20
+  STOP_SIGN = 21
+  BRAKING_AHEAD = 22
+  FLASHING_SIGNAL = 23
 
 
 NOTIFICATION_KINDS = frozenset({EventKind.STOPPED_TRAFFIC, EventKind.SHARP_CURVE, EventKind.SLOW_LEAD, EventKind.OVER_LIMIT,
-                                EventKind.SPEED_LIMIT, EventKind.BREAK, EventKind.RED_LIGHT, EventKind.YELLOW_LIGHT, EventKind.LIGHT_GREEN})
+                                EventKind.SPEED_LIMIT, EventKind.BREAK, EventKind.RED_LIGHT, EventKind.YELLOW_LIGHT, EventKind.LIGHT_GREEN,
+                                EventKind.PEDESTRIAN, EventKind.MERGING, EventKind.STOP_SIGN, EventKind.BRAKING_AHEAD,
+                                EventKind.FLASHING_SIGNAL})
 
 
 @dataclass(frozen=True)

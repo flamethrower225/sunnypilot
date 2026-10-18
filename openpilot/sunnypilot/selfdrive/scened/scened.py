@@ -7,33 +7,43 @@ See the LICENSE.md file in the root directory for more details.
 
 scened: camera object detection, publishing sceneDetectionSP.
 
-It takes turns looking at four regions, one per pass:
-  lights_near  a 624 px square of the road camera above the horizon, straight ahead: signal heads out to ~80 m
-  wide         the whole wide camera: cars beside and just ahead, and lights overhead when stopped at the line
+It looks at one of four regions per pass:
+  lights_near  a 624 px square of the road camera above the horizon, straight ahead: signal heads and stop signs out to ~80 m
+  wide         the whole wide camera: cars and people beside and just ahead, and lights overhead when stopped at the line
   lights_far   an 832 px square, the same place: heads further out to the sides
-  road         the whole road camera: cars ahead in every lane out to ~100 m
-and folds each into the traffic light filter and the vehicle tracker. It runs well below the driving model's rate, at low CPU
-priority, and slows down further whenever the driving model starts dropping frames or the device runs hot: the driving model always
-comes first.
+  road         the whole road camera: cars, people and stop signs ahead in every lane out to ~100 m
+and folds each into the traffic light and stop sign filters and the vehicle and people trackers. Which region comes next depends on
+where we are (PassScheduler): in town the lights get most of the looks, on an open highway the cars do.
+
+Distances from the cameras lean on the calibration; whenever the radar has a lead the cameras also see, the ratio of the two corrects
+the cameras' distances (RangeCalibrator). Every STATUS_EVERY the process writes how it's doing to the SceneDetectionStatus param for the
+Developer panel.
+
+It runs well below the driving model's rate, at low CPU priority, and slows down further whenever the driving model starts dropping
+frames or the device runs hot: the driving model always comes first.
 """
+import datetime
 import math
 import os
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from openpilot.cereal import custom, log, messaging
 from openpilot.cereal.visionipc import VisionStreamType
+from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
-from openpilot.sunnypilot.selfdrive.scened.detector import VEHICLE_CLASSES, Detection, Detector, ObjectClass
+from openpilot.sunnypilot.selfdrive.scened.detector import PEOPLE_CLASSES, VEHICLE_CLASSES, Detection, Detector, ObjectClass
 from openpilot.sunnypilot.selfdrive.scened.frames import NV12Sampler, Region, clamp_region
 from openpilot.sunnypilot.selfdrive.scened.geometry import RADAR_TO_CAMERA, CameraGeometry, camera_geometry
-from openpilot.sunnypilot.selfdrive.scened.traffic_lights import LightColor, LightObservation, TrafficLightFilter, estimate_distance, \
-  read_lamp, relevant
-from openpilot.sunnypilot.selfdrive.scened.vehicle_tracker import VehicleTracker, lane_index, sightings_from
+from openpilot.sunnypilot.selfdrive.scened.traffic_lights import Arrow, LightColor, LightObservation, SignObservation, StopSignFilter, \
+  TrafficLightFilter, estimate_distance, read_lamp, relevant, sign_distance, sign_relevant, stop_sign_face
+from openpilot.sunnypilot.selfdrive.scened.vehicle_tracker import VehicleSighting, VehicleTracker, lane_index, rear_lamp_energy, \
+  sightings_from
 
 PASS_HZ = 6.0              # passes per second at most
 MIN_PASS_HZ = 1.0
@@ -41,11 +51,34 @@ FRAME_DROP_LIMIT = 3.0     # % of driving model frames dropped before scened bac
 BACKOFF, RECOVER = 1.25, 0.97
 DUTY_MAX = 0.3             # share of the time scened may spend in passes
 ROAD, WIDE = 0, 1
+TOWN_SPEED = 20.0          # m/s, below this lights and signs are likely
+LIGHTS_RECENT = 20.0       # s, a light seen this recently means more may come
 
 LightState = custom.SceneDetectionSP.LightState
 VehicleKind = custom.SceneDetectionSP.VehicleKind
 KIND = {ObjectClass.CAR: VehicleKind.car, ObjectClass.MOTORCYCLE: VehicleKind.motorcycle, ObjectClass.BUS: VehicleKind.bus,
-        ObjectClass.TRUCK: VehicleKind.truck}
+        ObjectClass.TRUCK: VehicleKind.truck, ObjectClass.PERSON: VehicleKind.pedestrian, ObjectClass.BICYCLE: VehicleKind.cyclist}
+ArrowKind = custom.SceneDetectionSP.Arrow
+ARROW = {Arrow.NONE: ArrowKind.none, Arrow.LEFT: ArrowKind.left, Arrow.RIGHT: ArrowKind.right, Arrow.STRAIGHT: ArrowKind.straight,
+         Arrow.OTHER: ArrowKind.other}
+
+# people: tighter gates than cars, they're small and slow
+PEOPLE_GATE_X, PEOPLE_GATE_Y, PEOPLE_COAST = (1.5, 0.06), (0.9, 0.02), 1.0
+PEOPLE_MAX_DISTANCE = 50.0
+
+# range calibration from the radar lead
+CAL_LEAD_RANGE = (8.0, 80.0)     # m, radar lead distances to learn from
+CAL_GATE = (0.3, 1.6)            # a sighting within 30 % of the lead's distance and 1.6 m of its lateral position is the lead
+CAL_RATE = 0.04                  # per match, in log space
+CAL_LIMITS = (0.75, 1.33)
+CAL_MIN_MATCHES = 5              # matches before the correction is used
+
+# turn direction at a light, from the planned path
+TURN_LOOKAHEAD = 25.0            # m past the light
+TURN_OFFSET = 4.0                # m of sideways path there that means a turn
+
+STATUS_EVERY = 30.0              # s between status writes
+STATUS_EVENTS = 20
 LIGHT_STATE = {LightColor.UNKNOWN: LightState.unknown, LightColor.RED: LightState.red, LightColor.YELLOW: LightState.yellow,
                LightColor.GREEN: LightState.green}
 
@@ -75,16 +108,19 @@ def lights_region(geometry: CameraGeometry, side: int, frame_w: int, frame_h: in
 
 
 class PlanView:
-  """What the passes need from the latest modelV2: the planned path's lateral position and our lane's lines, by distance."""
+  """What the passes need from the latest modelV2: the planned path's lateral position, our lane's lines, and whether it plans to stop."""
 
   def __init__(self, model=None):
     self.path_x = self.path_y = np.zeros(0)
     self.left = self.right = None
+    self.stop_planned = False
     if model is None:
       return
     xs, ys = np.array(model.position.x, dtype=float), np.array(model.position.y, dtype=float)
     if xs.size >= 2 and xs.size == ys.size:
       self.path_x, self.path_y = xs, ys
+    vs = np.array(model.velocity.x, dtype=float)
+    self.stop_planned = bool(vs.size and vs.min() < 0.5 and vs[0] > 1.0)
     lines = model.laneLines
     if len(lines) >= 4 and len(model.laneLineProbs) >= 4 and min(model.laneLineProbs[1], model.laneLineProbs[2]) > 0.3:
       lx, ly = np.array(lines[1].x, dtype=float), np.array(lines[1].y, dtype=float)
@@ -100,6 +136,59 @@ class PlanView:
       return None
     return float(np.interp(x, *self.left)), float(np.interp(x, *self.right))
 
+  def turn_at(self, x: float) -> int:
+    """-1 when the path turns left past x, 1 right, 0 straight on: which arrows at a light there are ours."""
+    if self.path_x.size < 2 or x + TURN_LOOKAHEAD > self.path_x[-1]:
+      return 0
+    offset = self.path_at(x + TURN_LOOKAHEAD) - self.path_at(x)
+    return -1 if offset < -TURN_OFFSET else 1 if offset > TURN_OFFSET else 0
+
+
+@dataclass
+class Context:
+  """What a pass needs to know about us besides the picture."""
+  now: float
+  yaw_rate: float = 0.0
+  v_ego: float = 0.0
+  revisit: float = 4.0 / PASS_HZ          # s until the same camera looks at the same place again
+  lead: tuple[float, float] | None = None  # the radar lead (distance from the camera, m right) when the radar itself has it
+
+
+class RangeCalibrator:
+  """Learns how far off a camera's distances are from the radar: whenever the radar has a lead and a sighting sits on it, the ratio
+  of their distances moves the correction a little (in log space, so too far and too near count alike). Pitch errors in the
+  calibration show up as exactly this kind of scale error."""
+
+  def __init__(self):
+    self.log_scale = 0.0
+    self.matches = 0
+
+  @property
+  def scale(self) -> float:
+    return math.exp(self.log_scale) if self.matches >= CAL_MIN_MATCHES else 1.0
+
+  def learn(self, sightings: list[VehicleSighting], lead: tuple[float, float] | None) -> None:
+    if lead is None or not CAL_LEAD_RANGE[0] <= lead[0] <= CAL_LEAD_RANGE[1]:
+      return
+    lead_x, lead_y = lead
+    scale = math.exp(self.log_scale)
+    near = [s for s in sightings if abs(s.x * scale - lead_x) < CAL_GATE[0] * lead_x and abs(s.y * scale - lead_y) < CAL_GATE[1]]
+    if not near:
+      return
+    s = min(near, key=lambda s: abs(s.x * scale - lead_x))
+    target = math.log(lead_x / s.x)
+    self.log_scale += CAL_RATE * (target - self.log_scale)
+    self.log_scale = float(np.clip(self.log_scale, math.log(CAL_LIMITS[0]), math.log(CAL_LIMITS[1])))
+    self.matches += 1
+
+  def apply(self, sightings: list[VehicleSighting]) -> list[VehicleSighting]:
+    k = self.scale
+    if k == 1.0:
+      return sightings
+    for s in sightings:
+      s.x, s.y = s.x * k, s.y * k
+    return sightings
+
 
 class SceneDetection:
   """Everything but the camera and message plumbing, so it can be driven with recorded frames."""
@@ -107,7 +196,10 @@ class SceneDetection:
   def __init__(self, detector):
     self.detector = detector
     self.lights = TrafficLightFilter()
+    self.signs = StopSignFilter()
     self.tracker = VehicleTracker()
+    self.people = VehicleTracker(PEOPLE_GATE_X, PEOPLE_GATE_Y, PEOPLE_COAST)
+    self.calibration = {ROAD: RangeCalibrator(), WIDE: RangeCalibrator()}
     self._samplers: dict[tuple, NV12Sampler] = {}
 
   def sampler(self, width: int, height: int, stride: int, uv_offset: int) -> NV12Sampler:
@@ -116,43 +208,73 @@ class SceneDetection:
       self._samplers[key] = NV12Sampler(width, height, stride, uv_offset)
     return self._samplers[key]
 
-  def run_pass(self, spec: PassSpec, buf: np.ndarray, sampler: NV12Sampler, geometry: CameraGeometry, plan: PlanView, now: float,
-               yaw_rate: float, interval: float = 1.0 / PASS_HZ) -> list[Detection]:
+  def run_pass(self, spec: PassSpec, buf: np.ndarray, sampler: NV12Sampler, geometry: CameraGeometry, plan: PlanView,
+               ctx: Context) -> list[Detection]:
     if spec.lights_crop:
       region = lights_region(geometry, spec.lights_crop, sampler.width, sampler.height)
     else:
       region = Region(0, 0, sampler.width, sampler.height)
     dets = self.detector(sampler.detector_input(buf, region), region)
-
-    observations = []
     focal = float(geometry.intrinsics[0, 0])
+    road = spec.camera == ROAD
+
+    # signal heads, read for which lamp is lit and which way an arrow points
+    observations, turn = [], 0
     for d in dets:
       if d.cls != ObjectClass.TRAFFIC_LIGHT:
         continue
       lamp = read_lamp(sampler.crop_rgb(buf, d.x0, d.y0, d.x1, d.y1))
       (bearing,), (elevation,) = geometry.angles(0.5 * (d.x0 + d.x1), 0.5 * (d.y0 + d.y1))
       distance = estimate_distance(d.width, focal, float(elevation), geometry.height)
+      along = distance * math.cos(float(bearing))
       obs = LightObservation(lamp.color, lamp.confidence * d.score ** 0.5, float(bearing), float(elevation), distance,
-                             distance * math.sin(float(bearing)))
-      if relevant(obs, plan.path_at(distance * math.cos(float(bearing)))):
+                             distance * math.sin(float(bearing)), lamp.arrow)
+      if relevant(obs, plan.path_at(along)):
         observations.append(obs)
+        turn = plan.turn_at(along)
     # a pass that couldn't have seen a light says nothing about the lights
     if spec.lights_crop or observations:
-      self.lights.update(now, observations)
+      self.lights.update(ctx.now, observations, turn)
+
+    # stop signs, from the road camera (the wide camera's fisheye bends their size)
+    if road:
+      signs = []
+      for d in dets:
+        if d.cls != ObjectClass.STOP_SIGN:
+          continue
+        if not stop_sign_face(sampler.crop_rgb(buf, d.x0, d.y0, d.x1, d.y1)):
+          continue
+        (bearing,), _ = geometry.angles(0.5 * (d.x0 + d.x1), 0.5 * (d.y0 + d.y1))
+        distance = sign_distance(d.width, focal)
+        sign_obs = SignObservation(d.score, distance, distance * math.sin(float(bearing)))
+        if sign_relevant(sign_obs, plan.path_at(distance * math.cos(float(bearing)))):
+          signs.append(sign_obs)
+      self.signs.update(ctx.now, signs, ctx.v_ego)
 
     if spec.vehicles:
+      cal = self.calibration[spec.camera]
       vehicles = [d for d in dets if d.cls in VEHICLE_CLASSES]
-      width_focal = focal if spec.camera == ROAD else None   # the wide camera's fisheye stretches widths off center
-      sightings = sightings_from(vehicles, geometry, spec.camera, spec.max_distance, sampler.width, sampler.height, width_focal)
-      self.tracker.update(now, sightings, yaw_rate, revisit=interval * len(PASSES))
+      width_focal = focal if road else None   # the wide camera's fisheye stretches widths off center
+      lamp_of = (lambda d: rear_lamp_energy(sampler.crop_rgb(buf, d.x0, d.y0 + 0.1 * d.height, d.x1, d.y1 - 0.1 * d.height, max_side=64))) \
+        if road else None
+      sightings = sightings_from(vehicles, geometry, spec.camera, spec.max_distance, sampler.width, sampler.height, width_focal, lamp_of)
+      cal.learn(sightings, ctx.lead)
+      self.tracker.update(ctx.now, cal.apply(sightings), ctx.yaw_rate, revisit=ctx.revisit)
+      self.tracker.update_merging(plan.lane_lines_at)
+
+      people = [d for d in dets if d.cls in PEOPLE_CLASSES]
+      walkers = sightings_from(people, geometry, spec.camera, min(spec.max_distance, PEOPLE_MAX_DISTANCE), sampler.width, sampler.height)
+      self.people.update(ctx.now, cal.apply(walkers), ctx.yaw_rate, revisit=ctx.revisit)
     return dets
 
   def message(self, now: float, plan: PlanView, frame_id: int, pass_name: str, execution_time: float, pass_rate: float, throttled: bool,
-              compiled: bool):
+              compiled: bool, lights_share: float = 0.0):
     msg = messaging.new_message('sceneDetectionSP', valid=True)
     sd = msg.sceneDetectionSP
     sd.frameId, sd.passName, sd.executionTime = frame_id, pass_name, execution_time
     sd.passRate, sd.throttled, sd.compiled = pass_rate, throttled, compiled
+    sd.rangeScale, sd.rangeScaleWide = self.calibration[ROAD].scale, self.calibration[WIDE].scale
+    sd.lightsShare = lights_share
 
     light = self.lights.reading
     tl = sd.trafficLight
@@ -162,18 +284,126 @@ class SceneDetection:
     tl.bearing = light.bearing
     tl.stateAge = now - light.since if light.state != LightColor.UNKNOWN else 0.0
     tl.headCount = min(light.count, 255)
+    tl.flashing = light.flashing
+    tl.arrow = ARROW[light.arrow]
 
-    tracks = [t for t in self.tracker.tracks if t.confirmed]
-    vehicles = sd.init('vehicles', len(tracks))
-    for v, t in zip(vehicles, tracks, strict=True):
-      v.trackId = t.id
-      v.dRel, v.yRel, v.vRel = t.x - RADAR_TO_CAMERA, -t.y, t.vx
-      v.lane = lane_index(t.x, t.y, plan.lane_lines_at)
-      v.kind = KIND.get(t.cls, VehicleKind.car)
-      v.confidence = t.score
-      v.age, v.lastSeen = now - t.born, now - t.seen
-      v.camera = t.camera
+    sign = self.signs.reading
+    sd.stopSign.present = sign.present
+    sd.stopSign.distance = sign.distance - RADAR_TO_CAMERA if sign.present else math.nan
+    sd.stopSign.confidence = sign.confidence
+
+    for field_name, tracker in (('vehicles', self.tracker), ('people', self.people)):
+      tracks = [t for t in tracker.tracks if t.confirmed]
+      out = sd.init(field_name, len(tracks))
+      for v, t in zip(out, tracks, strict=True):
+        v.trackId = t.id
+        v.dRel, v.yRel, v.vRel = t.x - RADAR_TO_CAMERA, -t.y, t.vx
+        v.lateralSpeed = -t.vy
+        v.lane = lane_index(t.x, t.y, plan.lane_lines_at)
+        v.kind = KIND.get(t.cls, VehicleKind.car)
+        v.confidence = t.score
+        v.age, v.lastSeen = now - t.born, now - t.seen
+        v.camera = t.camera
+        v.braking, v.merging = t.braking, t.merging
     return msg
+
+
+class PassScheduler:
+  """Picks the next region by weight, deficit round robin: each pass earns its weight every step and the richest goes next, so the
+  shares follow the weights exactly and nothing starves. Lights and signs get most of the looks around town, when the model plans a
+  stop or a light was seen lately; on an open highway the cars do."""
+
+  def __init__(self, passes=PASSES):
+    self.passes = passes
+    self.credit = dict.fromkeys((p.name for p in passes), 0.0)
+    self.weights = dict.fromkeys((p.name for p in passes), 1.0)
+
+  def set_context(self, v_ego: float, stop_planned: bool, lights_recent: bool) -> None:
+    town = v_ego < TOWN_SPEED or stop_planned or lights_recent
+    stopped = v_ego < 1.0
+    for p in self.passes:
+      if p.lights_crop:
+        w = (2.0 if p.lights_crop < 700 else 1.5) if town else (0.4 if p.lights_crop < 700 else 0.3)
+      elif p.camera == WIDE:
+        w = 0.7 if stopped else 1.5
+      else:
+        w = 1.0 if stopped else 2.0
+      self.weights[p.name] = w
+
+  def next(self) -> PassSpec:
+    for p in self.passes:
+      self.credit[p.name] += self.weights[p.name]
+    best = max(self.passes, key=lambda p: self.credit[p.name])
+    self.credit[best.name] -= sum(self.weights.values())
+    return best
+
+  @property
+  def lights_share(self) -> float:
+    total = sum(self.weights.values())
+    return sum(self.weights[p.name] for p in self.passes if p.lights_crop) / total
+
+  def revisit(self, spec: PassSpec, interval: float) -> float:
+    """s until a pass of the same camera comes round again at these weights."""
+    total = sum(self.weights.values())
+    same = sum(self.weights[p.name] for p in self.passes if p.camera == spec.camera and p.vehicles == spec.vehicles)
+    return interval * total / max(same, 1e-3)
+
+
+@dataclass
+class StatusLog:
+  """What the Developer panel shows: how fast scened is running, how often it was held back, what it last saw."""
+  started: float
+  passes: dict = field(default_factory=dict)        # name -> [count, total s]
+  throttled_passes: int = 0
+  total_passes: int = 0
+  events: deque = field(default_factory=lambda: deque(maxlen=STATUS_EVENTS))
+  max_vehicles: int = 0
+  max_people: int = 0
+  stop_signs: int = 0
+  last_write: float = 0.0
+  _light: tuple = (LightColor.UNKNOWN, False, Arrow.NONE)
+  _sign: bool = False
+
+  def record(self, now: float, spec: PassSpec, seconds: float, throttled: bool, scene: SceneDetection) -> None:
+    count, total = self.passes.get(spec.name, (0, 0.0))
+    self.passes[spec.name] = (count + 1, total + seconds)
+    self.total_passes += 1
+    self.throttled_passes += int(throttled)
+    self.max_vehicles = max(self.max_vehicles, sum(t.confirmed for t in scene.tracker.tracks))
+    self.max_people = max(self.max_people, sum(t.confirmed for t in scene.people.tracks))
+    light = scene.lights.reading
+    key = (light.state, light.flashing, light.arrow)
+    if key != self._light:
+      self._light = key
+      self._event(f"light {('flashing ' if light.flashing else '') + light.state.name.lower()}"
+                  + (f" ({light.arrow.name.lower()} arrow)" if light.arrow != Arrow.NONE else "")
+                  + (f" at {light.distance:.0f} m" if math.isfinite(light.distance) else ""))
+    if scene.signs.reading.present != self._sign:
+      self._sign = scene.signs.reading.present
+      if self._sign:
+        self.stop_signs += 1
+        self._event(f"stop sign at {scene.signs.reading.distance:.0f} m")
+
+  def _event(self, text: str) -> None:
+    self.events.appendleft({"time": datetime.datetime.now().strftime("%H:%M:%S"), "event": text})
+
+  def snapshot(self, now: float, scene: SceneDetection, compiled: bool, interval: float, lights_share: float) -> dict:
+    return {
+      "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+      "uptime_s": round(now - self.started),
+      "compiled": compiled,
+      "pass_rate": round(1.0 / interval, 2),
+      "throttled_pct": round(100.0 * self.throttled_passes / max(self.total_passes, 1), 1),
+      "lights_share_pct": round(100.0 * lights_share),
+      "passes": {name: {"count": c, "avg_ms": round(1000.0 * t / max(c, 1), 1)} for name, (c, t) in self.passes.items()},
+      "range_scale": round(scene.calibration[ROAD].scale, 3),
+      "range_scale_wide": round(scene.calibration[WIDE].scale, 3),
+      "calibration_matches": scene.calibration[ROAD].matches,
+      "max_vehicles": self.max_vehicles,
+      "max_people": self.max_people,
+      "stop_signs": self.stop_signs,
+      "events": list(self.events),
+    }
 
 
 class Throttle:
@@ -211,7 +441,8 @@ def main():
   from msgq.visionipc import VisionIpcClient
   os.nice(10)  # the CPU is shared with everything that keeps the car on the road
 
-  sm = messaging.SubMaster(['modelV2', 'extrinsicsCalibration', 'carState', 'deviceState', 'narrowRoadCameraState'])
+  params = Params()
+  sm = messaging.SubMaster(['modelV2', 'extrinsicsCalibration', 'carState', 'deviceState', 'narrowRoadCameraState', 'radarState'])
   pm = messaging.PubMaster(['sceneDetectionSP'])
   clients = {ROAD: VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_NARROW_ROAD, True),
              WIDE: VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD, True)}
@@ -222,28 +453,39 @@ def main():
   cloudlog.warning(f"scened: detector ready, compiled={detector.compiled}")
   scene = SceneDetection(detector)
   throttle = Throttle()
+  scheduler = PassScheduler()
+  status = StatusLog(time.monotonic())
   rk = Ratekeeper(PASS_HZ, print_delay_threshold=None)
-  step = 0
   pass_time = 0.0
   while True:
     sm.update(0)
     hot = sm['deviceState'].thermalStatus >= log.DeviceState.ThermalStatus.overheated
     interval = throttle.update(sm['modelV2'].frameDropPerc if sm.recv_frame['modelV2'] > 0 else 0.0, hot, pass_time)
 
-    spec = PASSES[step % len(PASSES)]
-    step += 1
-    client = clients[spec.camera]
-    buf = client.recv()
+    plan = PlanView(sm['modelV2'] if sm.recv_frame['modelV2'] > 0 else None)
+    cs = sm['carState']
+    v_ego = float(cs.vEgo) if sm.recv_frame['carState'] > 0 else 0.0
+    now = time.monotonic()
+    lights_recent = scene.lights.reading.state != LightColor.UNKNOWN or now - scene.lights.last_seen < LIGHTS_RECENT or scene.signs.reading.present
+    scheduler.set_context(v_ego, plan.stop_planned, lights_recent)
+    spec = scheduler.next()
+    buf = clients[spec.camera].recv()
     if buf is None:
       continue
     t0 = time.monotonic()
-    plan = PlanView(sm['modelV2'] if sm.recv_frame['modelV2'] > 0 else None)
+    lead = sm['radarState'].leadOne if sm.recv_frame['radarState'] > 0 else None
+    radar_lead = (lead.dRel + RADAR_TO_CAMERA, -lead.yRel) if lead is not None and lead.present and lead.radar else None
+    ctx = Context(t0, float(cs.yawRate) if sm.recv_frame['carState'] > 0 else 0.0, v_ego, scheduler.revisit(spec, interval), radar_lead)
     sampler = scene.sampler(buf.width, buf.height, buf.stride, buf.uv_offset)
-    yaw_rate = float(sm['carState'].yawRate) if sm.recv_frame['carState'] > 0 else 0.0
-    scene.run_pass(spec, np.frombuffer(buf.data, dtype=np.uint8), sampler, geometry_for(sm, spec.camera), plan, t0, yaw_rate, interval)
+    scene.run_pass(spec, np.frombuffer(buf.data, dtype=np.uint8), sampler, geometry_for(sm, spec.camera), plan, ctx)
     pass_time = time.monotonic() - t0
     pm.send('sceneDetectionSP', scene.message(time.monotonic(), plan, clients[ROAD].frame_id, spec.name, pass_time,
-                                              1.0 / interval, throttle.throttled, detector.compiled))
+                                              1.0 / interval, throttle.throttled, detector.compiled, scheduler.lights_share))
+
+    status.record(t0, spec, pass_time, throttle.throttled, scene)
+    if t0 - status.last_write > STATUS_EVERY:
+      status.last_write = t0
+      params.put("SceneDetectionStatus", status.snapshot(t0, scene, detector.compiled, interval, scheduler.lights_share))
 
     rk.keep_time()
     if interval > 1.0 / PASS_HZ:

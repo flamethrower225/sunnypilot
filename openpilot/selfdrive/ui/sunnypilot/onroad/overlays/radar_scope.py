@@ -17,6 +17,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import get_bottom_dev
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, DOT_MIN, INK, WHITE, ZONE_RGB, rgba, draw_triangle, \
   roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, FT_PER_M
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import camera_people
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import CLASS_RGB, RadarFeed, RadarTrack, TrackClass, display_zone, \
   shared_radar_feed
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -52,6 +53,9 @@ TICK_WIDTH = 6.0
 LEAD_RING_RADIUS, LEAD_RING_WIDTH = 23.0, 6.0
 BLINDSPOT_LATERAL = (2.2, 5.0)     # m from our centerline, the lane beside us
 BLINDSPOT_AHEAD = 4.0              # m past the bumper the lit zone reaches
+BRAKE_RGB = (255, 40, 30)
+PERSON_RGB = ZONE_RGB[GapZone.CAUTION]
+KIND_CYCLIST = 5                   # SceneDetectionSP.VehicleKind
 
 
 @dataclass(frozen=True)
@@ -121,7 +125,9 @@ class RadarScope:
   """Top-down minimap: lane lines from the model, range rings, and a dot per radar track.
   Dots are cyan when moving the same way, gray when stationary, hollow pink when oncoming, and severity colored when closing on us.
   Cars the cameras found (Camera Object Detection) are rounded squares in the same colors.
-  The lead has a solid ring, the second lead a dashed one, and a tick on each moving dot points the way it's pulling (up is faster than us)."""
+  The lead has a solid ring, the second lead a dashed one, and a tick on each moving dot points the way it's pulling (up is faster than us).
+  A car whose brake lights are on has two red lamps at its back, one drifting into our lane a chevron pointing in, and the people the
+  cameras see are small amber figures (with a wheel under a cyclist)."""
 
   def __init__(self):
     dt = self._dt = 1 / gui_app.target_fps
@@ -133,6 +139,7 @@ class RadarScope:
     self._blindspots = (FirstOrderFilter(0.0, 0.1, dt), FirstOrderFilter(0.0, 0.1, dt))  # left, right
     self._lanes_model = None
     self._rings: list[tuple[rl.Vector2, rl.Vector2]] = []
+    self._people: list = []
 
   def update(self) -> None:
     if not ui_state.radar_scope:
@@ -145,6 +152,7 @@ class RadarScope:
     self._blindspots[0].update(1.0 if fresh and cs.leftBlindspot else 0.0)
     self._blindspots[1].update(1.0 if fresh and cs.rightBlindspot else 0.0)
     self._alpha.update(1.0 if self._feed.available else 0.0)
+    self._people = camera_people(sm)
     if self._alpha.x > 0.01:
       self._update_lanes(sm)
 
@@ -260,6 +268,9 @@ class RadarScope:
     tracks.sort(key=lambda t: (t.cls != TrackClass.STATIONARY, t.ttc < math.inf))
     for t in tracks:
       self._draw_dot(frame, t, now, alpha)
+    for p in self._people:
+      if frame.visible(p.dRel, -p.yRel):
+        draw_person(*frame.project(p.dRel, -p.yRel), p.kind == KIND_CYCLIST, alpha)
 
     for lead, ring in ((lead_two, "dashed"), (lead_one, "solid")):
       if lead is not None and frame.visible(lead.d_rel, lead.y_right):
@@ -296,13 +307,27 @@ class RadarScope:
       # a car the cameras found: a rounded square, so it reads apart from the radar's dots
       box = rl.Rectangle(x - radius, y - radius * 1.25, 2 * radius, 2.5 * radius)
       rl.draw_rectangle_rounded(box, 0.45, 8, rgba(rgb, a))
-      rl.draw_rectangle_rounded_lines_ex(box, 0.45, 8, 2.5, rgba(WHITE, 0.55 * alpha))
+      if t.braking:   # its outline turns brake red, so it reads even under a lead ring
+        rl.draw_rectangle_rounded_lines_ex(box, 0.45, 8, 4.0, rgba(BRAKE_RGB, alpha))
+      else:
+        rl.draw_rectangle_rounded_lines_ex(box, 0.45, 8, 2.5, rgba(WHITE, 0.55 * alpha))
+      if t.braking:
+        draw_brake_lamps(x, y + radius * 1.25, radius, now, alpha)
     elif t.cls == TrackClass.ONCOMING and zone is None:
       rl.draw_ring(rl.Vector2(x, y), radius - 5.0, radius, 0, 360, 24, rgba(rgb, a))
     else:
       rl.draw_circle_v(rl.Vector2(x, y), radius, rgba(rgb, a))
       if not stationary:
         rl.draw_circle_v(rl.Vector2(x - radius * 0.25, y - radius * 0.25), radius * 0.35, rgba(WHITE, 0.35 * alpha))
+      if t.braking:
+        rl.draw_ring(rl.Vector2(x, y), radius + 1.0, radius + 4.0, 0, 360, 24, rgba(BRAKE_RGB, alpha))
+        draw_brake_lamps(x, y + radius * 0.9, radius, now, alpha)
+    if t.merging:
+      # a chevron on the side toward our lane, pointing in
+      side = -1.0 if x > frame.cx else 1.0
+      tip = x + side * (radius + 16)
+      rgb_m = ZONE_RGB[GapZone.CLOSE]
+      draw_triangle((tip, y), (tip - side * 12, y - 10), (tip - side * 12, y + 10), rgba(rgb_m, alpha))
 
   @staticmethod
   def _draw_lead_ring(frame: ScopeFrame, lead: RadarTrack, style: str, now: float, alpha: float) -> None:
@@ -328,3 +353,23 @@ class RadarScope:
     rl.draw_rectangle_rounded(rl.Rectangle(cx - EGO_W * 0.32, top + EGO_H * 0.68, EGO_W * 0.64, EGO_H * 0.14), 0.5, 6, rgba(INK, 0.35 * alpha))
     # nose marker, the origin radar distances are measured from
     draw_triangle((cx - 8, top - 3), (cx + 8, top - 3), (cx, top - 15), rgba(WHITE, 0.9 * alpha))
+
+
+def draw_brake_lamps(x: float, y: float, radius: float, now: float, alpha: float) -> None:
+  """Two red lamps across the back of a car (the side toward us), glowing."""
+  glow = 0.75 + 0.25 * math.sin(now * 2 * math.pi / 0.5)
+  for dx in (-radius * 0.65, radius * 0.65):
+    c = rl.Vector2(x + dx, y)
+    rl.draw_circle_v(c, 8.0, rgba(BRAKE_RGB, 0.3 * glow * alpha))
+    rl.draw_circle_v(c, 4.5, rgba(BRAKE_RGB, alpha))
+
+
+def draw_person(x: float, y: float, cyclist: bool, alpha: float) -> None:
+  ink = rgba(PERSON_RGB, alpha)
+  rl.draw_circle_v(rl.Vector2(x, y - 13), 5.0, ink)
+  rl.draw_line_ex(rl.Vector2(x, y - 8), rl.Vector2(x, y + 4), 5.0, ink)
+  if cyclist:
+    rl.draw_ring(rl.Vector2(x, y + 10), 4.0, 7.0, 0, 360, 16, ink)
+  else:
+    rl.draw_line_ex(rl.Vector2(x, y + 3), rl.Vector2(x - 5, y + 13), 4.0, ink)
+    rl.draw_line_ex(rl.Vector2(x, y + 3), rl.Vector2(x + 5, y + 13), 4.0, ink)
