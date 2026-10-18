@@ -71,6 +71,9 @@ def livestream(started: bool, params: Params, CP: car.CarParams) -> bool:
 def dash_re_enabled(started, params, CP: car.CarParams) -> bool:
   return params.get_bool("DashReEnabled")
 
+def scene_detection_enabled(started, params, CP: car.CarParams) -> bool:
+  return params.get_bool("SceneDetection")
+
 def use_copyparty(started, params, CP: car.CarParams) -> bool:
   return bool(params.get_bool("EnableCopyparty"))
 
@@ -186,6 +189,9 @@ procs += [
 
   # dash research: listen-only CAN findings for the instrument cluster
   PythonProcess("dashred", "openpilot.sunnypilot.tools.dash_re.dashred", and_(only_onroad, dash_re_enabled)),
+
+  # camera object detection: traffic light state and the cars around us
+  PythonProcess("scened", "openpilot.sunnypilot.selfdrive.scened.scened", and_(only_onroad, scene_detection_enabled), enabled=not PC),
 ]
 
 if os.path.exists("../../sunnypilot/sunnylink/uploader.py"):

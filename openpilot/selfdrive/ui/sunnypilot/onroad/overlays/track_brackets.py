@@ -73,6 +73,19 @@ def project_box(to_screen: Callable[[float, float, float], tuple[float, float] |
   return pad_box(min(xs), min(ys), max(xs), max(ys))
 
 
+def project_boxes(projector: RoadProjector, tracks: list[RadarTrack]) -> list[np.ndarray | None]:
+  """project_box for many tracks, all corners in one projection."""
+  if not tracks:
+    return []
+  half = BOX_WIDTH / 2
+  d = np.repeat([t.d_rel for t in tracks], 4)
+  y = np.repeat([t.y_right for t in tracks], 4) + np.tile([-half, -half, half, half], len(tracks))
+  h = np.tile([0.0, BOX_HEIGHT, 0.0, BOX_HEIGHT], len(tracks))
+  screen, ok = projector.to_screen_many(d, y, h)
+  screen, ok = screen.reshape(-1, 4, 2), ok.reshape(-1, 4)
+  return [pad_box(*c.min(0), *c.max(0)) if visible.all() else None for c, visible in zip(screen, ok, strict=True)]
+
+
 def pad_box(left: float, top: float, right: float, bottom: float) -> np.ndarray:
   """Grows a box that projected tiny up to a minimum size, keeping it standing on the same spot."""
   cx = (left + right) / 2
@@ -126,8 +139,7 @@ class TrackBrackets:
       return
 
     live = set()
-    for t in self._selected:
-      box = project_box(projector.to_screen, t.d_rel, t.y_right)
+    for t, box in zip(self._selected, project_boxes(projector, self._selected), strict=True):
       if box is None:
         continue
       b = self._brackets.get(t.track_id)

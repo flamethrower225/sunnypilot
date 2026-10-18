@@ -120,6 +120,7 @@ def draw_polyline(points: list, thickness: float, color: rl.Color) -> None:
 class RadarScope:
   """Top-down minimap: lane lines from the model, range rings, and a dot per radar track.
   Dots are cyan when moving the same way, gray when stationary, hollow pink when oncoming, and severity colored when closing on us.
+  Cars the cameras found (Camera Object Detection) are rounded squares in the same colors.
   The lead has a solid ring, the second lead a dashed one, and a tick on each moving dot points the way it's pulling (up is faster than us)."""
 
   def __init__(self):
@@ -291,7 +292,12 @@ class RadarScope:
       rl.draw_line_ex(rl.Vector2(x, start), rl.Vector2(x, end), TICK_WIDTH, rgba(rgb, 0.8 * alpha))
       rl.draw_circle_v(rl.Vector2(x, end), TICK_WIDTH / 2, rgba(rgb, 0.8 * alpha))
 
-    if t.cls == TrackClass.ONCOMING and zone is None:
+    if t.camera:
+      # a car the cameras found: a rounded square, so it reads apart from the radar's dots
+      box = rl.Rectangle(x - radius, y - radius * 1.25, 2 * radius, 2.5 * radius)
+      rl.draw_rectangle_rounded(box, 0.45, 8, rgba(rgb, a))
+      rl.draw_rectangle_rounded_lines_ex(box, 0.45, 8, 2.5, rgba(WHITE, 0.55 * alpha))
+    elif t.cls == TrackClass.ONCOMING and zone is None:
       rl.draw_ring(rl.Vector2(x, y), radius - 5.0, radius, 0, 360, 24, rgba(rgb, a))
     else:
       rl.draw_circle_v(rl.Vector2(x, y), radius, rgba(rgb, a))
