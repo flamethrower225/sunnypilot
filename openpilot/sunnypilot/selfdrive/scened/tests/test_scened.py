@@ -270,7 +270,7 @@ class TestSceneDetection:
     for _ in range(200):
       th.update(0.0, False)
     assert th.interval == pytest.approx(1 / PASS_HZ) and not th.throttled
-    assert th.update(0.0, False, pass_time=0.12) == pytest.approx(0.12 / 0.3)   # never more than 30 % busy
+    assert th.update(0.0, False, pass_time=0.12) == pytest.approx(0.12 / 0.2)   # never more than 20 % busy
 
   def test_lights_region_looks_above_the_horizon(self):
     r = lights_region(ROAD_GEO, 624, W, H)

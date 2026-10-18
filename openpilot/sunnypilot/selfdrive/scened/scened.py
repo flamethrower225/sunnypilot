@@ -34,7 +34,6 @@ import numpy as np
 from openpilot.cereal import custom, log, messaging
 from openpilot.cereal.visionipc import VisionStreamType
 from openpilot.common.params import Params
-from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.sunnypilot.selfdrive.scened.detector import PEOPLE_CLASSES, VEHICLE_CLASSES, Detection, Detector, ObjectClass
@@ -45,11 +44,22 @@ from openpilot.sunnypilot.selfdrive.scened.traffic_lights import Arrow, LightCol
 from openpilot.sunnypilot.selfdrive.scened.vehicle_tracker import VehicleSighting, VehicleTracker, lane_index, rear_lamp_energy, \
   sightings_from
 
-PASS_HZ = 6.0              # passes per second at most
+PASS_HZ = 5.0              # passes per second at most
 MIN_PASS_HZ = 1.0
 FRAME_DROP_LIMIT = 3.0     # % of driving model frames dropped before scened backs off
 BACKOFF, RECOVER = 1.25, 0.97
-DUTY_MAX = 0.3             # share of the time scened may spend in passes
+DUTY_MAX = 0.2             # share of the time scened may spend in passes
+
+# the GPU is shared with the driving model and the driver monitoring model, and work on it can't be preempted: a pass that lands
+# on top of them makes them late, and a late driverMonitoringState is a communication issue that disengages. scened watches how
+# long each of them takes and gets out of the way when they slow down.
+GUARD_SLACK = (1.25, 0.004)   # a run longer than its usual time * 1.25 + 4 ms was slowed down by something
+GUARD_RISE = 0.01             # the usual time follows a faster run at once and a slower one only this share per run
+GUARD_WINDOW = 2.0            # s of runs to judge from
+GUARD_SLOW_SHARE = 0.15       # share of slowed runs in the window that makes scened back off
+DM_BUDGET = 0.038             # s, a driver monitoring run longer than this leaves no margin at 20 Hz, whatever its usual time
+GUARD_PAUSE_AFTER = 3.0       # s of backing off before scened stops altogether ...
+GUARD_PAUSE = 20.0            # ... for this long
 ROAD, WIDE = 0, 1
 TOWN_SPEED = 20.0          # m/s, below this lights and signs are likely
 LIGHTS_RECENT = 20.0       # s, a light seen this recently means more may come
@@ -372,6 +382,7 @@ class StatusLog:
   max_people: int = 0
   stop_signs: int = 0
   last_write: float = 0.0
+  guard: 'ModelGuard | None' = None   # the GPU guard, for the yields and the models' usual times
   _light: tuple = (LightColor.UNKNOWN, False, Arrow.NONE)
   _sign: bool = False
 
@@ -414,18 +425,65 @@ class StatusLog:
       "max_people": self.max_people,
       "stop_signs": self.stop_signs,
       "events": list(self.events),
+      "model_ms": round(1000.0 * self.guard.usual.get('modelV2', 0.0), 1) if self.guard else 0.0,
+      "dm_ms": round(1000.0 * self.guard.usual.get('driverStateV2', 0.0), 1) if self.guard else 0.0,
+      "yields": self.guard.pauses if self.guard else 0,
     }
 
 
+class ModelGuard:
+  """Watches the driving model's and the driver monitoring model's run times for the slowdowns scened's GPU work causes. Each
+  model's usual time is the floor of its recent runs (scened is idle for most of them); a run well over it was held up. slow is
+  true while too many recent runs were; after GUARD_PAUSE_AFTER of that, paused stays true for GUARD_PAUSE. It keeps watching while
+  paused, so if the models are still slow when the pause ends (scened was not the cause, but there is no room for it either) it
+  pauses again at once, and comes back only once they have been quick for a while."""
+
+  def __init__(self):
+    self.usual: dict[str, float] = {}
+    self._runs: deque[tuple[float, str, bool]] = deque()
+    self._slow_since: float | None = None
+    self.paused_until = -math.inf
+    self.pauses = 0
+    self.slow = False
+
+  def sample(self, now: float, model: str, run_time: float, budget: float = math.inf) -> None:
+    if not math.isfinite(run_time) or run_time <= 0.0:
+      return
+    usual = self.usual.get(model, run_time)
+    held_up = run_time > usual * GUARD_SLACK[0] + GUARD_SLACK[1] or run_time > budget
+    self.usual[model] = run_time if run_time < usual else usual + GUARD_RISE * (run_time - usual)
+    self._runs.append((now, model, held_up))
+
+  def update(self, now: float) -> None:
+    while self._runs and self._runs[0][0] < now - GUARD_WINDOW:
+      self._runs.popleft()
+    runs: dict[str, list[bool]] = {}
+    for _, model, held_up in self._runs:
+      runs.setdefault(model, []).append(held_up)
+    self.slow = any(sum(held) / len(held) > GUARD_SLOW_SHARE for held in runs.values())   # either model, judged on its own runs
+    if not self.slow:
+      self._slow_since = None
+    elif self._slow_since is None:
+      self._slow_since = now
+    elif now - self._slow_since > GUARD_PAUSE_AFTER and not self.paused(now):
+      self.paused_until, self._slow_since = now + GUARD_PAUSE, None
+      self.pauses += 1
+      self._runs.clear()   # judge afresh once back
+
+  def paused(self, now: float) -> bool:
+    return now < self.paused_until
+
+
 class Throttle:
-  """Pass interval that backs off while the driving model drops frames or the device is hot, and creeps back after. It also never
-  lets a pass take more than DUTY_MAX of the time, whatever the detector costs on this device."""
+  """Pass interval that backs off while the driving model drops frames, the models sharing the GPU are slowed down or the device is
+  hot, and creeps back after. It also never lets a pass take more than DUTY_MAX of the time, whatever the detector costs on this
+  device."""
 
   def __init__(self):
     self.interval = 1.0 / PASS_HZ
 
-  def update(self, frame_drop_pct: float, hot: bool, pass_time: float = 0.0) -> float:
-    if hot or frame_drop_pct > FRAME_DROP_LIMIT:
+  def update(self, frame_drop_pct: float, hot: bool, pass_time: float = 0.0, models_slow: bool = False) -> float:
+    if hot or frame_drop_pct > FRAME_DROP_LIMIT or models_slow:
       self.interval = min(self.interval * BACKOFF, 1.0 / MIN_PASS_HZ)
     else:
       self.interval = max(self.interval * RECOVER, 1.0 / PASS_HZ)
@@ -453,7 +511,9 @@ def main():
   os.nice(10)  # the CPU is shared with everything that keeps the car on the road
 
   params = Params()
-  sm = messaging.SubMaster(['modelV2', 'extrinsicsCalibration', 'carState', 'deviceState', 'narrowRoadCameraState', 'radarState'])
+  # paced by the driving model: each pass starts just after modeld has published, in the gap before its next frame
+  sm = messaging.SubMaster(['modelV2', 'driverStateV2', 'extrinsicsCalibration', 'carState', 'deviceState', 'narrowRoadCameraState',
+                            'radarState'], poll='modelV2')
   pm = messaging.PubMaster(['sceneDetectionSP'])
   clients = {ROAD: VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_NARROW_ROAD, True),
              WIDE: VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD, True)}
@@ -464,26 +524,33 @@ def main():
   cloudlog.warning(f"scened: detector ready, compiled={detector.compiled}")
   scene = SceneDetection(detector)
   throttle = Throttle()
+  guard = ModelGuard()
   scheduler = PassScheduler()
-  status = StatusLog(time.monotonic())
-  rk = Ratekeeper(PASS_HZ, print_delay_threshold=None)
-  pass_time = 0.0
+  status = StatusLog(time.monotonic(), guard=guard)
+  pass_time, last_pass = 0.0, -math.inf
   while True:
-    sm.update(0)
+    sm.update(200)
+    now = time.monotonic()
+    if sm.updated['modelV2']:
+      guard.sample(now, 'modelV2', sm['modelV2'].modelExecutionTime)
+    if sm.updated['driverStateV2']:
+      guard.sample(now, 'driverStateV2', sm['driverStateV2'].modelExecutionTime, DM_BUDGET)
+    guard.update(now)
     hot = sm['deviceState'].thermalStatus >= log.DeviceState.ThermalStatus.overheated
-    interval = throttle.update(sm['modelV2'].frameDropPerc if sm.recv_frame['modelV2'] > 0 else 0.0, hot, pass_time)
+    interval = throttle.update(sm['modelV2'].frameDropPerc if sm.recv_frame['modelV2'] > 0 else 0.0, hot, pass_time, guard.slow)
+    if guard.paused(now) or not sm.updated['modelV2'] or now - last_pass < interval:
+      continue
 
     plan = PlanView(sm['modelV2'] if sm.recv_frame['modelV2'] > 0 else None)
     cs = sm['carState']
     v_ego = float(cs.vEgo) if sm.recv_frame['carState'] > 0 else 0.0
-    now = time.monotonic()
     lights_recent = scene.lights.reading.state != LightColor.UNKNOWN or now - scene.lights.last_seen < LIGHTS_RECENT or scene.signs.reading.present
     scheduler.set_context(v_ego, plan.stop_planned, lights_recent)
     spec = scheduler.next()
     buf = clients[spec.camera].recv()
     if buf is None:
       continue
-    t0 = time.monotonic()
+    t0 = last_pass = time.monotonic()
     lead = sm['radarState'].leadOne if sm.recv_frame['radarState'] > 0 else None
     radar_lead = (lead.dRel + RADAR_TO_CAMERA, -lead.yRel) if lead is not None and lead.present and lead.radar else None
     ctx = Context(t0, float(cs.yawRate) if sm.recv_frame['carState'] > 0 else 0.0, v_ego, scheduler.revisit(spec, interval), radar_lead)
@@ -497,10 +564,6 @@ def main():
     if t0 - status.last_write > STATUS_EVERY:
       status.last_write = t0
       params.put("SceneDetectionStatus", status.snapshot(t0, scene, detector.compiled, interval, scheduler.lights_share))
-
-    rk.keep_time()
-    if interval > 1.0 / PASS_HZ:
-      time.sleep(interval - 1.0 / PASS_HZ)
 
 
 if __name__ == "__main__":

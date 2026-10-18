@@ -198,8 +198,8 @@ class VisualsLayout(Widget):
            "a car drifting into your lane. The light or stop sign shows in a chip at the top left (with how long you have waited " +
            "at a red), names the stop on the stop card, feeds Pace Border and adds notifications. Cars show as rounded squares " +
            "on the radar scope (with brake lamps, and a chevron when merging), people as amber figures. Distances calibrate " +
-           "themselves against the radar. It slows itself down whenever the driving model needs the time; Developer > Camera " +
-           "Detection Status shows how it ran. Advisory only: it doesn't " +
+           "themselves against the radar. It shares the GPU with the driving and driver monitoring models and steps aside " +
+           "whenever either slows down; Developer > Camera Detection Status shows how it ran. Advisory only: it doesn't " +
            "change how openpilot drives. Takes effect on the next drive."),
       ),
       "HardBrakeFlash": (

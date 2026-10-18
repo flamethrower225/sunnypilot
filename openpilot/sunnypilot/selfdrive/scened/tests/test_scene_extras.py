@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 
 from openpilot.sunnypilot.selfdrive.scened.detector import Detection, ObjectClass
-from openpilot.sunnypilot.selfdrive.scened.scened import PASSES, ROAD, Context, PassScheduler, PlanView, RangeCalibrator, \
-  SceneDetection, StatusLog
+from openpilot.sunnypilot.selfdrive.scened.scened import DM_BUDGET, GUARD_PAUSE, MIN_PASS_HZ, PASSES, ROAD, Context, ModelGuard, \
+  PassScheduler, PlanView, RangeCalibrator, SceneDetection, StatusLog, Throttle
 from openpilot.sunnypilot.selfdrive.scened.tests.test_scened import H, ROAD_GEO, W, FakeDetector, nv12
 from openpilot.sunnypilot.selfdrive.scened.traffic_lights import Arrow, LightColor, LightObservation, SignObservation, StopSignFilter, \
   TrafficLightFilter, arrow_weight, read_arrow, read_lamp, sign_distance, sign_relevant, stop_sign_face
@@ -321,3 +321,49 @@ class TestMessageTiming:
     assert sd.vehicles[0].dRel == pytest.approx(x - 5.0 * 0.4 - 1.52, abs=0.01)
     sd = scene.message(5.0, PlanView(), 2, "road", 0.01, 5.0, False, True).sceneDetectionSP
     assert sd.trafficLight.distance == pytest.approx(60.0 - 10.0 - 1.52, abs=0.01)   # never more than a second ahead
+
+
+# ---- sharing the GPU with the driving and driver monitoring models ----
+
+class TestModelGuard:
+  def drive(self, guard, seconds, model_ms, dm_ms, start=0.0, every=None):
+    """Feeds 20 Hz runs; every nth run of the driver monitoring model takes dm_ms[1] instead of dm_ms[0] (scened landing on it)."""
+    t = start
+    for i in range(int(seconds * 20)):
+      dm = dm_ms[1] if every and i % every == 0 else dm_ms[0]
+      guard.sample(t, 'modelV2', model_ms / 1000)
+      guard.sample(t, 'driverStateV2', dm / 1000, DM_BUDGET)
+      guard.update(t)
+      t += 0.05
+    return t
+
+  def test_quiet_models_leave_scened_alone(self):
+    guard = ModelGuard()
+    self.drive(guard, 10.0, 30.0, (12.0, 12.0))
+    assert not guard.slow and not guard.paused(10.0) and guard.usual['driverStateV2'] == pytest.approx(0.012)
+
+  def test_a_slow_usual_time_is_not_a_slowdown(self):
+    guard = ModelGuard()
+    self.drive(guard, 10.0, 82.0, (12.0, 12.0))   # a big driving model, steady
+    assert not guard.slow
+
+  def test_backs_off_then_stops_when_driver_monitoring_is_held_up(self):
+    guard = ModelGuard()
+    t = self.drive(guard, 5.0, 30.0, (12.0, 12.0))
+    t = self.drive(guard, 1.5, 30.0, (12.0, 30.0), start=t, every=4)   # one run in four held up by a pass
+    assert guard.slow and not guard.paused(t)
+    t = self.drive(guard, 3.5, 30.0, (12.0, 30.0), start=t, every=4)
+    assert guard.paused(t) and guard.pauses == 1
+    t = self.drive(guard, GUARD_PAUSE + 1.0, 30.0, (12.0, 12.0), start=t)   # nothing in the way while paused
+    assert not guard.paused(t) and not guard.slow
+
+  def test_a_driver_monitoring_run_over_budget_counts_however_usual(self):
+    guard = ModelGuard()
+    t = self.drive(guard, 3.0, 30.0, (42.0, 42.0))
+    assert guard.slow and t > 0
+
+  def test_throttle_backs_off_while_slow(self):
+    th = Throttle()
+    for _ in range(20):
+      th.update(0.0, False, models_slow=True)
+    assert th.interval == pytest.approx(1 / MIN_PASS_HZ) and th.throttled

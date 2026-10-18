@@ -26,8 +26,21 @@ def _rate(sm, service: str) -> dict:
           "min_hz": round(tracker.min_freq, 1), "max_hz": round(tracker.max_freq, 1)}
 
 
+def checked(sm, logs: dict) -> dict:
+  """The failing services selfdrived actually holds against the car. Its lists name every subscribed service, including the ones
+  it ignores (alertDebug and lateralManeuverPlan only come from the maneuver tools), which would point the reader the wrong way."""
+  ignore_alive, ignore_valid = getattr(sm, "ignore_alive", []), getattr(sm, "ignore_valid", [])
+  check_freq = getattr(sm, "_check_avg_freq", lambda s: True)
+  return {
+    "not_alive": [s for s in logs["not_alive"] if s not in ignore_alive],
+    "invalid": [s for s in logs["invalid"] if s not in ignore_valid],
+    "not_freq_ok": [s for s in logs["not_freq_ok"] if check_freq(s)],
+  }
+
+
 def snapshot(sm, logs: dict) -> dict:
-  if logs["not_alive"]:
+  logs = checked(sm, logs)
+  if logs["not_alive"]:   # in the order selfdrived picks the alert
     kind = "commIssue (a process stopped sending)"
   elif logs["not_freq_ok"]:
     kind = "commIssueAvgFreq (low communication rate)"
@@ -56,10 +69,13 @@ class CommIssueLog:
 
   def record(self, sm, logs: dict) -> None:
     """Called by selfdrived when the set of failing services changes. Never lets a logging problem reach selfdrived."""
-    if not (logs["not_alive"] or logs["invalid"] or logs["not_freq_ok"]):
+    if not any(checked(sm, logs).values()):
       return
     try:
-      self._entries.appendleft(snapshot(sm, logs))
+      entry = snapshot(sm, logs)
+      if self._entries and self._entries[0].get("time") == entry["time"] and self._entries[0].get("kind") == entry["kind"]:
+        self._entries.popleft()   # the list changed again within the second: one entry, the latest
+      self._entries.appendleft(entry)
       self._params.put(PARAM, list(self._entries))  # non-blocking
     except Exception:
       pass

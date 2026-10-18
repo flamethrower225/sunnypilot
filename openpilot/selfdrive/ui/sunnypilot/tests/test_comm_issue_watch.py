@@ -86,3 +86,40 @@ def test_viewer_pairs_records_and_points_at_the_curve_preview():
   hot = cw.comm_issues_html([dict(sd[0], thermal="overheated")], [])
   assert "device thermal state is overheated" in hot
   assert "No communication issues recorded" in cw.comm_issues_html(None, None)
+
+
+def test_viewer_on_the_driver_monitoring_alert_of_2026_10_18():
+  # the entry as recorded before selfdrived's ignored services were left out
+  sd = [{"time": "2026-10-18 20:55:51", "kind": "commIssue (a process stopped sending)",
+         "not_alive": ["alertDebug", "lateralManeuverPlan"], "invalid": ["driverMonitoringState", "alertDebug", "lateralManeuverPlan"],
+         "late": [{"service": "driverMonitoringState", "hz": 15.9, "recent_hz": 12.5, "min_hz": 16.0, "max_hz": 24.0},
+                  {"service": "alertDebug"}, {"service": "lateralManeuverPlan"}],
+         "model_ms": 82.2, "frame_drop_pct": 0.1, "cpu_pct": [52, 49, 48, 58, 91, 64, 28, 29], "gpu_pct": 4, "max_temp_c": 58.5,
+         "thermal": "ok"}]
+  ui = [{"time": "2026-10-18 20:55:51", "alert": "commIssue/softDisable", "ui_frame_avg_ms": 50.0, "ui_frame_max_ms": 65.3,
+         "max_lat_acc": 0.24, "curve_ahead": False, "scc_v_active": False, "overlays": [], "dm_ms_avg": 24.0, "dm_ms_max": 61.0,
+         "scened": {"running": True, "pass_rate": 6.0, "pass_ms": 140.0, "throttled": False}}]
+  html = cw.comm_issues_html(sd, ui)
+  assert "alertDebug" not in html and "lateralManeuverPlan" not in html   # tool-only streams are noise
+  assert "late: driverMonitoringState at 15.9 Hz" in html and "invalid: driverMonitoringState" in html
+  assert "driver monitoring model: 24.0 ms average, 61.0 ms worst" in html
+  assert "Camera Object Detection: 6.0 passes/s, 140.0 ms per pass" in html
+  assert "driver monitoring fell behind (its model took up to 61.0 ms)" in html and "turn it off in Visuals" in html
+
+
+def test_records_driver_monitoring_time_and_scened():
+  sm, params = FakeSM(), FakeParams()
+  sm.updated['driverStateV2'] = True
+  ds = messaging.new_message('driverStateV2')
+  ds.driverStateV2.modelExecutionTime = 0.03
+  sd = messaging.new_message('sceneDetectionSP')
+  sd.sceneDetectionSP.passRate, sd.sceneDetectionSP.executionTime, sd.sceneDetectionSP.throttled = 4.0, 0.09, True
+  sm.data.update(driverStateV2=ds.driverStateV2, sceneDetectionSP=sd.sceneDetectionSP)
+  sm.recv_frame = {'sceneDetectionSP': 5}
+  ui = SimpleNamespace(started=True, started_frame=0, sm=sm, params=params, scene_detection=True)
+  watch = cw.CommIssueWatch()
+  run(watch, ui, sm, 20, 0.05)
+  run(watch, ui, sm, 2, 0.05, alert="commIssue/softDisable")
+  (entry,) = params.data[cw.PARAM]
+  assert entry["dm_ms_avg"] == 30.0 and entry["dm_ms_max"] == 30.0
+  assert entry["scened"] == {"running": True, "pass_rate": 4.0, "pass_ms": 90.0, "throttled": True}

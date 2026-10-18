@@ -6,7 +6,8 @@ See the LICENSE.md file in the root directory for more details.
 
 The UI's side of a communication issue. selfdrived records which streams were late (CommIssueLog); the UI records what
 it was doing at that moment: how long its frames took, whether the model saw a curve ahead (when the curve preview draws
-the most), whether vision curve speed control was active, and which onroad overlays were on.
+the most), whether vision curve speed control was active, which onroad overlays were on, how long the driver monitoring
+model took, and what Camera Object Detection (which shares the GPU with both models) was doing.
 """
 import time
 from collections import deque
@@ -20,11 +21,14 @@ CURVE_LAT_ACC = 1.6      # m/s^2 predicted lateral acceleration that counts as a
 OVERLAY_FLAGS = ("curve_hologram", "stop_detection", "detection_log", "radar_scope", "radar_track_brackets", "threat_board",
                  "follow_ghost", "lead_braking_wake", "disengage_horizon", "driver_flags", "hard_brake_flash", "lead_gap_history",
                  "pace_border", "drive_notifications", "lead_gap_badge")  # every HUD overlay toggle (the badge is on when its style isn't Off)
+TOOL_ONLY = ("alertDebug", "lateralManeuverPlan")  # only the maneuver tools send these and selfdrived ignores them; older entries list them
+DM_SLOW_MS = 38.0        # a driver monitoring run longer than this leaves no margin at 20 Hz
 
 
 class CommIssueWatch:
   def __init__(self):
     self._samples: deque[tuple[float, float, float, bool]] = deque()  # (mono time, frame ms, max lateral accel, SCC-V active)
+    self._dm: deque[tuple[float, float]] = deque()   # (mono time, driver monitoring model ms)
     self._last_mono: float | None = None
     self._lat_acc = 0.0
     self._alert_prev = False
@@ -48,6 +52,10 @@ class CommIssueWatch:
     self._samples.append((now, frame_ms, self._lat_acc, scc_v))
     while self._samples and self._samples[0][0] < now - WINDOW_S:
       self._samples.popleft()
+    if sm.updated.get('driverStateV2', False):
+      self._dm.append((now, float(sm['driverStateV2'].modelExecutionTime) * 1000))
+    while self._dm and self._dm[0][0] < now - WINDOW_S:
+      self._dm.popleft()
 
     alert = str(sm['selfdriveState'].alertType)
     is_comm = alert.startswith("commIssue")
@@ -66,12 +74,27 @@ class CommIssueWatch:
       "curve_ahead": any(s[2] >= CURVE_LAT_ACC for s in self._samples),
       "scc_v_active": any(s[3] for s in self._samples),
       "overlays": [f for f in OVERLAY_FLAGS if getattr(ui_state, f, False)],
+      "dm_ms_avg": round(float(np.mean([d for _, d in self._dm])), 1) if self._dm else 0.0,
+      "dm_ms_max": round(max(d for _, d in self._dm), 1) if self._dm else 0.0,
+      "scened": scened_state(ui_state),
     }
     try:
       entries = ([entry] + list(ui_state.params.get(PARAM) or []))[:MAX_ENTRIES]
       ui_state.params.put(PARAM, entries)  # non-blocking
     except Exception:
       pass
+
+
+def scened_state(ui_state) -> dict | None:
+  """What Camera Object Detection was doing, or None when it's off."""
+  if not getattr(ui_state, "scene_detection", False):
+    return None
+  sm = ui_state.sm
+  if sm.recv_frame.get('sceneDetectionSP', -1) < ui_state.started_frame:
+    return {"running": False}
+  sd = sm['sceneDetectionSP']
+  return {"running": True, "pass_rate": round(float(sd.passRate), 1), "pass_ms": round(float(sd.executionTime) * 1000, 1),
+          "throttled": bool(sd.throttled)}
 
 
 # *** viewer ***
@@ -91,6 +114,15 @@ def _parse(t: str) -> float:
 def _hints(sd: dict, ui: dict | None) -> list[str]:
   hints = []
   late = {r.get("service") for r in sd.get("late", [])}
+  failing = late | set(sd.get("invalid", [])) | set(sd.get("not_alive", []))
+  dm_failing = bool(failing & {"driverMonitoringState", "driverStateV2"})
+  if dm_failing:
+    slow = f" (its model took up to {ui['dm_ms_max']} ms)" if ui and ui.get("dm_ms_max", 0) > DM_SLOW_MS else ""
+    hints.append(f"driver monitoring fell behind{slow}: its model shares a CPU core with the driving model, and the GPU with it")
+  scened = ui.get("scened") if ui else None
+  if scened and (dm_failing or "modelV2" in failing):
+    hints.append("Camera Object Detection was running, and it shares the GPU with both models. It now steps aside when they slow " +
+                 "down; if this alert comes back, turn it off in Visuals and see whether it stops")
   if sd.get("thermal", "") not in ("ok", ""):
     hints.append(f"device thermal state is {sd['thermal']}: heat is throttling the CPU")
   if "modelV2" in late or sd.get("frame_drop_pct", 0) > 5:
@@ -118,12 +150,14 @@ def comm_issues_html(sd_entries: list | None, ui_entries: list | None) -> str:
     parts.append(f"<h3>{_safe(sd.get('time', ''))}</h3><p>{_safe(sd.get('kind', ''))}</p>")
     lines = []
     for r in sd.get("late", []):
+      if r.get("service") in TOOL_ONLY:
+        continue
       if "hz" in r:
         lines.append(f"late: {_safe(r['service'])} at {r['hz']} Hz (recent {r['recent_hz']} Hz), allowed {r['min_hz']}-{r['max_hz']} Hz")
       else:
         lines.append(f"late: {_safe(r['service'])}")
-    lines += [f"stopped: {_safe(s)}" for s in sd.get("not_alive", [])]
-    lines += [f"invalid: {_safe(s)}" for s in sd.get("invalid", [])]
+    lines += [f"stopped: {_safe(s)}" for s in sd.get("not_alive", []) if s not in TOOL_ONLY]
+    lines += [f"invalid: {_safe(s)}" for s in sd.get("invalid", []) if s not in TOOL_ONLY]
     cpu = sd.get("cpu_pct", [])
     lines.append(f"model: {sd.get('model_ms', 0)} ms per run, {sd.get('frame_drop_pct', 0)}% frames dropped")
     cpu_text = f"CPU max {max(cpu) if cpu else 0}% ({', '.join(map(str, cpu))})"
@@ -133,6 +167,15 @@ def comm_issues_html(sd_entries: list | None, ui_entries: list | None) -> str:
       frames = f"frames {ui['ui_frame_avg_ms']} ms average, {ui['ui_frame_max_ms']} ms worst"
       lines.append(f"UI: {frames}; {curve}; SCC-V: {'active' if ui['scc_v_active'] else 'off'}")
       lines.append("overlays on: " + (", ".join(ui["overlays"]) or "none"))
+      if ui.get("dm_ms_max"):
+        lines.append(f"driver monitoring model: {ui['dm_ms_avg']} ms average, {ui['dm_ms_max']} ms worst")
+      scened = ui.get("scened")
+      if scened is not None:
+        if scened.get("running"):
+          held = ", held back" if scened.get("throttled") else ""
+          lines.append(f"Camera Object Detection: {scened['pass_rate']} passes/s, {scened['pass_ms']} ms per pass{held}")
+        else:
+          lines.append("Camera Object Detection: on, not running yet")
     parts.append("<ul>" + "".join(f"<li>{line}</li>" for line in lines) + "</ul>")
     hints = _hints(sd, ui)
     if hints:

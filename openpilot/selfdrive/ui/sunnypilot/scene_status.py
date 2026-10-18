@@ -31,6 +31,9 @@ def _hints(s: dict) -> list[str]:
     if abs(scale - 1.0) > SCALE_HINT:
       hints.append(f"the {camera} camera's distances needed a {100 * (scale - 1):+.0f}% correction against the radar: " +
                    "check the device mount and recalibrate")
+  if s.get("yields", 0):
+    hints.append(f"it stepped aside {s['yields']} times because the driving or driver monitoring model slowed down while it ran: " +
+                 "if Communication Issue alerts appear, turn it off")
   slow = [name for name, p in s.get("passes", {}).items() if p.get("avg_ms", 0.0) > SLOW_PASS_MS]
   if slow:
     hints.append("slow passes: " + ", ".join(PASS_NAMES.get(n, n) for n in slow))
@@ -56,6 +59,9 @@ def scene_status_html(status: dict | None, enabled: bool) -> str:
   matches = s.get("calibration_matches", 0)
   lines.append(f"distance scale: road {s.get('range_scale', 1.0):.3f}, wide {s.get('range_scale_wide', 1.0):.3f} "
                + (f"(from {matches} radar matches)" if matches else "(not yet calibrated against the radar)"))
+  if s.get("model_ms") or s.get("dm_ms"):
+    lines.append(f"sharing the GPU with: the driving model ({s.get('model_ms', 0)} ms a run) and driver monitoring " +
+                 f"({s.get('dm_ms', 0)} ms a run); stepped aside {s.get('yields', 0)} times")
   lines.append(f"most at once: {s.get('max_vehicles', 0)} cars, {s.get('max_people', 0)} people; {s.get('stop_signs', 0)} stop signs")
   parts.append("<ul>" + "".join(f"<li>{line}</li>" for line in lines) + "</ul>")
 
