@@ -77,6 +77,7 @@ CAL_MIN_MATCHES = 5              # matches before the correction is used
 TURN_LOOKAHEAD = 25.0            # m past the light
 TURN_OFFSET = 4.0                # m of sideways path there that means a turn
 
+MESSAGE_PREDICT_MAX = 1.0       # s a message brings what it reports forward at most
 STATUS_EVERY = 30.0              # s between status writes
 STATUS_EVENTS = 20
 LIGHT_STATE = {LightColor.UNKNOWN: LightState.unknown, LightColor.RED: LightState.red, LightColor.YELLOW: LightState.yellow,
@@ -201,6 +202,7 @@ class SceneDetection:
     self.people = VehicleTracker(PEOPLE_GATE_X, PEOPLE_GATE_Y, PEOPLE_COAST)
     self.calibration = {ROAD: RangeCalibrator(), WIDE: RangeCalibrator()}
     self._samplers: dict[tuple, NV12Sampler] = {}
+    self._v_ego = 0.0
 
   def sampler(self, width: int, height: int, stride: int, uv_offset: int) -> NV12Sampler:
     key = (width, height, stride, uv_offset)
@@ -233,8 +235,9 @@ class SceneDetection:
         observations.append(obs)
         turn = plan.turn_at(along)
     # a pass that couldn't have seen a light says nothing about the lights
+    self._v_ego = ctx.v_ego
     if spec.lights_crop or observations:
-      self.lights.update(ctx.now, observations, turn)
+      self.lights.update(ctx.now, observations, turn, ctx.v_ego)
 
     # stop signs, from the road camera (the wide camera's fisheye bends their size)
     if road:
@@ -280,7 +283,8 @@ class SceneDetection:
     tl = sd.trafficLight
     tl.state = LIGHT_STATE[light.state]
     tl.confidence = light.confidence
-    tl.distance = light.distance - RADAR_TO_CAMERA if math.isfinite(light.distance) else math.nan
+    # distances as of now, not as of the pass that last saw them: the UI counts down from here, so they don't jump at each look
+    tl.distance = self._closer(light.distance, self.lights.updated_at, now) - RADAR_TO_CAMERA
     tl.bearing = light.bearing
     tl.stateAge = now - light.since if light.state != LightColor.UNKNOWN else 0.0
     tl.headCount = min(light.count, 255)
@@ -289,15 +293,16 @@ class SceneDetection:
 
     sign = self.signs.reading
     sd.stopSign.present = sign.present
-    sd.stopSign.distance = sign.distance - RADAR_TO_CAMERA if sign.present else math.nan
+    sd.stopSign.distance = self._closer(sign.distance, self.signs.updated_at, now) - RADAR_TO_CAMERA if sign.present else math.nan
     sd.stopSign.confidence = sign.confidence
 
     for field_name, tracker in (('vehicles', self.tracker), ('people', self.people)):
       tracks = [t for t in tracker.tracks if t.confirmed]
       out = sd.init(field_name, len(tracks))
+      ahead = min(max(now - tracker.updated_at, 0.0), MESSAGE_PREDICT_MAX) if tracker.updated_at is not None else 0.0
       for v, t in zip(out, tracks, strict=True):
         v.trackId = t.id
-        v.dRel, v.yRel, v.vRel = t.x - RADAR_TO_CAMERA, -t.y, t.vx
+        v.dRel, v.yRel, v.vRel = t.x + t.vx * ahead - RADAR_TO_CAMERA, -(t.y + t.vy * ahead), t.vx
         v.lateralSpeed = -t.vy
         v.lane = lane_index(t.x, t.y, plan.lane_lines_at)
         v.kind = KIND.get(t.cls, VehicleKind.car)
@@ -306,6 +311,12 @@ class SceneDetection:
         v.camera = t.camera
         v.braking, v.merging = t.braking, t.merging
     return msg
+
+  def _closer(self, distance: float, since: float | None, now: float) -> float:
+    """A distance read at since, brought forward to now at our speed."""
+    if not math.isfinite(distance) or since is None:
+      return distance
+    return max(distance - self._v_ego * min(max(now - since, 0.0), MESSAGE_PREDICT_MAX), 0.0)
 
 
 class PassScheduler:

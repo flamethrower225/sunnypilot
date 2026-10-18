@@ -296,3 +296,28 @@ class TestSceneMessage:
     assert snap["stop_signs"] == 1 and "stop sign at 25 m" in snap["events"][0]["event"]
     assert snap["range_scale"] == 1.0 and snap["calibration_matches"] == 0
     assert scene.calibration[ROAD].scale == 1.0
+
+
+# ---- messages say where things are now, not where the last look saw them ----
+
+class TestMessageTiming:
+  def test_a_light_comes_closer_between_looks(self):
+    f = TrafficLightFilter()
+    f.update(0.0, [obs(LightColor.RED, 60.0)], v_ego=10.0)
+    f.update(1.0, [obs(LightColor.RED, 50.0)], v_ego=10.0)
+    assert f.reading.distance == pytest.approx(50.0)   # the old 60 m, 10 m closer by now, agrees with the new look
+
+  def test_message_brings_distances_and_cars_forward(self):
+    scene = SceneDetection(FakeDetector([]))
+    scene._v_ego = 10.0
+    scene.lights._last_t, scene.lights._distance = 0.0, 60.0
+    scene.lights.reading = scene.lights.reading.__class__(LightColor.RED, 0.9, 60.0, 0.0, 0.0, 1)
+    scene.tracker.update(0.0, [VehicleSighting(30.0, 0.0, 0.9, 2, 0)])
+    scene.tracker.update(0.2, [VehicleSighting(29.0, 0.0, 0.9, 2, 0)])
+    scene.tracker.tracks[0].vx = -5.0
+    sd = scene.message(0.6, PlanView(), 1, "road", 0.01, 5.0, False, True).sceneDetectionSP
+    assert sd.trafficLight.distance == pytest.approx(60.0 - 6.0 - 1.52, abs=0.01)
+    x = scene.tracker.tracks[0].x
+    assert sd.vehicles[0].dRel == pytest.approx(x - 5.0 * 0.4 - 1.52, abs=0.01)
+    sd = scene.message(5.0, PlanView(), 2, "road", 0.01, 5.0, False, True).sceneDetectionSP
+    assert sd.trafficLight.distance == pytest.approx(60.0 - 10.0 - 1.52, abs=0.01)   # never more than a second ahead
