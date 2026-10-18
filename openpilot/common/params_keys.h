@@ -208,6 +208,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"DriverFlags", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"FollowGhost", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"HardBrakeFlash", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"PaceBorder", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"LeadBrakingWake", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"LeadGapHistory", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"RadarScope", {PERSISTENT | BACKUP, BOOL, "0"}},
