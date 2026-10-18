@@ -5,8 +5,8 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 The object detector: YOLOX-nano (Megvii, Apache-2.0, see models/README.md), trained on COCO, which knows cars, trucks, buses,
-motorcycles and traffic lights. On the device it runs from the tinygrad program the build compiles from models/scene_detector.onnx,
-on the GPU next to the driving model; on a PC it can also run straight from the ONNX file.
+motorcycles, traffic lights, stop signs, people and bicycles. On the device it runs from the tinygrad program the build compiles from
+models/scene_detector.onnx, on the GPU next to the driving model; on a PC it can also run straight from the ONNX file.
 """
 import pickle
 from dataclasses import dataclass
@@ -31,16 +31,21 @@ MAX_DETECTIONS = 40
 
 class ObjectClass(IntEnum):
   # COCO ids
+  PERSON = 0
+  BICYCLE = 1
   CAR = 2
   MOTORCYCLE = 3
   BUS = 5
   TRUCK = 7
   TRAFFIC_LIGHT = 9
+  STOP_SIGN = 11
 
 
 VEHICLE_CLASSES = frozenset({ObjectClass.CAR, ObjectClass.MOTORCYCLE, ObjectClass.BUS, ObjectClass.TRUCK})
+PEOPLE_CLASSES = frozenset({ObjectClass.PERSON, ObjectClass.BICYCLE})
 KEPT_CLASSES = np.array(sorted(int(c) for c in ObjectClass))
 LIGHT_SCORE_MIN = 0.25   # lights are small and the model is less sure of them; the color check and tracking sort out the rest
+SIGN_SCORE_MIN = 0.35    # a red octagon is distinctive; anything less sure is usually a red sign of another kind
 
 
 @dataclass(frozen=True)
@@ -97,7 +102,7 @@ def decode(raw: np.ndarray, region: Region) -> list[Detection]:
   best = scores.argmax(1)
   score = scores[np.arange(len(best)), best]
   cls = KEPT_CLASSES[best]
-  keep = score >= np.where(cls == ObjectClass.TRAFFIC_LIGHT, LIGHT_SCORE_MIN, SCORE_MIN)
+  keep = score >= np.select([cls == ObjectClass.TRAFFIC_LIGHT, cls == ObjectClass.STOP_SIGN], [LIGHT_SCORE_MIN, SIGN_SCORE_MIN], SCORE_MIN)
   if not keep.any():
     return []
   xy = (out[keep, :2] + GRID[keep]) * GRID_STRIDES[keep]

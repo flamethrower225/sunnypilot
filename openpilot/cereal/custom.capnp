@@ -481,6 +481,11 @@ struct SceneDetectionSP @0xcb9fd56c7057593a {
 
   trafficLight @6 :TrafficLight;
   vehicles @7 :List(Vehicle);
+  stopSign @8 :StopSign;
+  people @9 :List(Vehicle);        # pedestrians and cyclists, kind pedestrian or cyclist
+  rangeScale @10 :Float32;         # road camera distances are scaled by this, learned from the radar lead (1 until it has one)
+  rangeScaleWide @11 :Float32;
+  lightsShare @12 :Float32;        # share of passes spent looking for lights and signs right now
 
   struct TrafficLight {
     state @0 :LightState;
@@ -489,6 +494,22 @@ struct SceneDetectionSP @0xcb9fd56c7057593a {
     bearing @3 :Float32;           # rad, right positive
     stateAge @4 :Float32;          # s the state has held
     headCount @5 :UInt8;           # relevant heads in view
+    flashing @6 :Bool;             # flashing red (a stop sign) or flashing yellow (caution)
+    arrow @7 :Arrow;               # the state is an arrow's, for the way the planned path goes
+  }
+
+  enum Arrow {
+    none @0;
+    left @1;
+    right @2;
+    straight @3;
+    other @4;
+  }
+
+  struct StopSign {
+    present @0 :Bool;
+    distance @1 :Float32;          # m from the front bumper, NaN when none
+    confidence @2 :Float32;
   }
 
   enum LightState {
@@ -509,6 +530,9 @@ struct SceneDetectionSP @0xcb9fd56c7057593a {
     age @7 :Float32;               # s since first seen
     lastSeen @8 :Float32;          # s since last sighted
     camera @9 :UInt8;              # 0 road, 1 wide
+    braking @10 :Bool;             # its brake lights came on
+    lateralSpeed @11 :Float32;     # m/s, left positive
+    merging @12 :Bool;             # drifting into our lane from the next one
   }
 
   enum VehicleKind {
@@ -516,6 +540,8 @@ struct SceneDetectionSP @0xcb9fd56c7057593a {
     motorcycle @1;
     bus @2;
     truck @3;
+    pedestrian @4;
+    cyclist @5;
   }
 }
 

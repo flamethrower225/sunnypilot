@@ -20,6 +20,7 @@ import numpy as np
 
 from openpilot.sunnypilot.selfdrive.scened.detector import Detection
 from openpilot.sunnypilot.selfdrive.scened.geometry import CameraGeometry
+from openpilot.sunnypilot.selfdrive.scened.traffic_lights import rgb_to_hsv
 
 ALPHA = 0.55              # how far a track moves toward its new sighting
 BETA = 0.2                # and how much of the leftover goes into its speed
@@ -42,6 +43,26 @@ OCCLUSION_OVERLAP = 0.3   # share of a box's width a nearer box has to cover for
 OCCLUSION_MARGIN = 8.0    # px, the nearer box has to reach at least this much lower
 TWIN_IOU = 0.6            # a box overlapping this much is the same car boxed twice, not one in front
 
+# brake lights
+BRAKE_RATIO = 1.8         # the back glows this many times its brakes-off level
+BRAKE_JUMP = 0.012        # and at least this much more of it
+BRAKE_MIN = 0.02          # and at least this share of it glows at all
+BRAKE_OFF_RISE = 0.05     # how fast the brakes-off level follows a brighter back while not braking
+BRAKE_VOTES = 2           # looks in a row
+BRAKE_STALE = 1.5         # s without a look at its back before braking is forgotten
+BRAKE_LAMP_RANGE = 60.0   # m, further out the lamps are a few pixels
+LAMP_HUE = (18.0, 335.0)  # degrees: red is below the first or above the second
+LAMP_SATURATION = 0.5
+LAMP_VALUE = 0.5
+LAMP_ABOVE_MEDIAN = 0.15
+
+# merging
+MERGE_RANGE = (-5.0, 40.0)   # m from the camera
+MERGE_MIN_SPEED = 0.35       # m/s toward our lane
+MERGE_MAX_GAP = 2.5          # m from our lane line
+MERGE_TIME = 3.0             # s to reach it
+MERGE_VOTES = 2
+
 
 @dataclass
 class VehicleSighting:
@@ -50,6 +71,7 @@ class VehicleSighting:
   score: float
   cls: int
   camera: int       # 0 road, 1 wide
+  lamp: float = math.nan   # how much of its back glows brake-light red (rear_lamp_energy), when it's seen from behind
 
 
 @dataclass
@@ -65,6 +87,13 @@ class VehicleTrack:
   camera: int = 0
   born: float = 0.0
   seen: float = 0.0   # monotonic s of the last sighting
+  lamp_fast: float = math.nan   # recent rear lamp energy
+  lamp_off: float = math.nan    # its level with the brakes off: follows drops at once, rises slowly
+  lamp_seen: float = 0.0
+  brake_votes: int = 0
+  braking: bool = False
+  merge_votes: int = 0
+  merging: bool = False
 
   @property
   def confirmed(self) -> bool:
@@ -99,12 +128,23 @@ def width_range(d: Detection, focal: float, max_aspect: float = REAR_ASPECT[1]) 
   return focal * VEHICLE_WIDTH.get(int(d.cls), 1.8) / max(d.width, 1.0)
 
 
+def rear_lamp_energy(rgb: np.ndarray) -> float:
+  """Share of a car's back (RGB 0-255 crop of its box) glowing lamp red: saturated red pixels clearly brighter than the rest of
+  the back. Brake lights raise it a lot; tail lights, red paint and reflections only a little and steadily, which the off level in
+  update_brake_lights absorbs."""
+  if rgb.size == 0 or min(rgb.shape[:2]) < 4:
+    return math.nan
+  h, s, v = rgb_to_hsv(rgb)
+  red = ((h < LAMP_HUE[0]) | (h > LAMP_HUE[1])) & (s > LAMP_SATURATION) & (v > max(LAMP_VALUE, float(np.median(v)) + LAMP_ABOVE_MEDIAN))
+  return float(red.mean())
+
+
 def sightings_from(dets: list[Detection], geometry: CameraGeometry, camera: int, max_distance: float,
-                   frame_w: int, frame_h: int, width_focal: float | None = None) -> list[VehicleSighting]:
+                   frame_w: int, frame_h: int, width_focal: float | None = None, lamp_of=None) -> list[VehicleSighting]:
   """Places detected vehicles on the road where the bottom of the box meets it. Further out that leans on the calibration's pitch
   (a tenth of a degree is meters at 50 m), so when width_focal is given (a camera without much distortion) the distance is
   averaged with the one the car's width gives. A box cut off at the side is placed from its visible end; one too small or that
-  never meets the road is skipped."""
+  never meets the road is skipped. lamp_of(detection) reads the brake lights of a car seen from behind, when given."""
   out = []
   for d in dets:
     if d.width < MIN_BOX_PX or d.height < MIN_BOX_PX:
@@ -135,7 +175,10 @@ def sightings_from(dets: list[Detection], geometry: CameraGeometry, camera: int,
       x, y = x * scale, y * scale
     if x > max_distance:
       continue
-    out.append(VehicleSighting(float(x), float(y), d.score, int(d.cls), camera))
+    lamp = math.nan
+    if lamp_of is not None and not cut and x <= BRAKE_LAMP_RANGE and REAR_ASPECT[0] <= d.width / max(d.height, 1.0) <= REAR_ASPECT[1]:
+      lamp = lamp_of(d)
+    out.append(VehicleSighting(float(x), float(y), d.score, int(d.cls), camera, lamp))
   return out
 
 
@@ -146,11 +189,38 @@ def ego_motion(x: float, y: float, dtheta: float) -> tuple[float, float]:
   return x * c - y * s, x * s + y * c
 
 
+def update_brake_lights(t: VehicleTrack, lamp: float, now: float) -> None:
+  """Brake lights: the back of the car glowing clearly more red than it does with the brakes off. The off level adapts (tail lights
+  at night are always on) but never while braking, and it drops at once when the lamps dim, so a car first seen braking at a light
+  shows as braking once it lets go and brakes again."""
+  if not math.isfinite(lamp):
+    if now - t.lamp_seen > BRAKE_STALE:
+      t.braking, t.brake_votes = False, 0
+    return
+  t.lamp_seen = now
+  t.lamp_fast = lamp if not math.isfinite(t.lamp_fast) else 0.5 * t.lamp_fast + 0.5 * lamp
+  if not math.isfinite(t.lamp_off):
+    t.lamp_off = lamp
+  elif lamp < t.lamp_off:
+    t.lamp_off = lamp
+  elif not t.braking:
+    t.lamp_off += BRAKE_OFF_RISE * (lamp - t.lamp_off)
+  lit = t.lamp_fast > max(BRAKE_RATIO * t.lamp_off, t.lamp_off + BRAKE_JUMP, BRAKE_MIN)
+  t.brake_votes = min(t.brake_votes + 1, BRAKE_VOTES) if lit else max(t.brake_votes - 1, 0)
+  if t.brake_votes >= BRAKE_VOTES:
+    t.braking = True
+  elif t.brake_votes == 0:
+    t.braking = False
+
+
 class VehicleTracker:
-  def __init__(self):
+  """gate_x and gate_y are the matching gates (m, and share of the distance); people get tighter ones than cars."""
+
+  def __init__(self, gate_x: tuple[float, float] = GATE_X, gate_y: tuple[float, float] = GATE_Y, coast: float = COAST):
     self.tracks: list[VehicleTrack] = []
     self._next_id = 1
     self._t: float | None = None
+    self.gate_x, self.gate_y, self.coast = gate_x, gate_y, coast
 
   def predict(self, now: float, yaw_rate: float) -> None:
     dt = 0.0 if self._t is None else max(now - self._t, 0.0)
@@ -173,7 +243,7 @@ class VehicleTracker:
     # greedy matching, closest pairs first: cheap and good enough at a few dozen objects
     pairs = []
     for i, t in enumerate(self.tracks):
-      gx, gy = max(GATE_X[0], GATE_X[1] * t.x), max(GATE_Y[0], GATE_Y[1] * t.x)
+      gx, gy = max(self.gate_x[0], self.gate_x[1] * t.x), max(self.gate_y[0], self.gate_y[1] * t.x)
       for j, s in enumerate(sightings):
         cost = math.hypot((s.x - t.x) / gx, (s.y - t.y) / gy)
         if cost < 1.0:
@@ -188,11 +258,13 @@ class VehicleTracker:
 
     for j, s in enumerate(sightings):
       if j not in used_s and len(self.tracks) < MAX_TRACKS:
-        self.tracks.append(VehicleTrack(self._next_id, s.x, s.y, score=s.score, cls=s.cls, camera=s.camera, born=now, seen=now))
+        track = VehicleTrack(self._next_id, s.x, s.y, score=s.score, cls=s.cls, camera=s.camera, born=now, seen=now)
+        update_brake_lights(track, s.lamp, now)
+        self.tracks.append(track)
         self._next_id += 1
 
     floor = REVISITS_TO_COAST * revisit
-    self.tracks = [t for t in self.tracks if now - t.seen <= max(COAST_BESIDE if t.x < BESIDE_X else COAST, floor)]
+    self.tracks = [t for t in self.tracks if now - t.seen <= max(COAST_BESIDE if t.x < BESIDE_X else self.coast, floor)]
     self._merge()
     return [t for t in self.tracks if t.confirmed]
 
@@ -201,14 +273,31 @@ class VehicleTracker:
     self.tracks.sort(key=lambda t: t.born)
     kept: list[VehicleTrack] = []
     for t in self.tracks:
-      twin = next((k for k in kept if math.hypot((t.x - k.x) / max(GATE_X[0], GATE_X[1] * k.x),
-                                                 (t.y - k.y) / max(GATE_Y[0], GATE_Y[1] * k.x)) < MERGE), None)
+      twin = next((k for k in kept if math.hypot((t.x - k.x) / max(self.gate_x[0], self.gate_x[1] * k.x),
+                                                 (t.y - k.y) / max(self.gate_y[0], self.gate_y[1] * k.x)) < MERGE), None)
       if twin is None:
         kept.append(t)
       else:
         twin.hits = max(twin.hits, t.hits)
         twin.seen = max(twin.seen, t.seen)
     self.tracks = kept
+
+  def update_merging(self, lane_ys_at) -> None:
+    """A car in the next lane drifting toward ours fast enough to be over the line within MERGE_TIME is merging, once that has held
+    for MERGE_VOTES looks in a row."""
+    for t in self.tracks:
+      lines = lane_ys_at(t.x)
+      left, right = lines if lines is not None else (-LANE_WIDTH / 2, LANE_WIDTH / 2)
+      if t.y < left:
+        gap, toward = left - t.y, t.vy        # left of our lane, moving right is toward us
+      elif t.y > right:
+        gap, toward = t.y - right, -t.vy
+      else:
+        gap, toward = 0.0, 0.0
+      drifting = (t.confirmed and MERGE_RANGE[0] <= t.x <= MERGE_RANGE[1] and toward > MERGE_MIN_SPEED and gap < MERGE_MAX_GAP
+                  and gap / toward < MERGE_TIME)
+      t.merge_votes = min(t.merge_votes + 1, MERGE_VOTES) if drifting else max(t.merge_votes - 1, 0)
+      t.merging = t.merge_votes >= MERGE_VOTES or (t.merging and t.merge_votes > 0)
 
   @staticmethod
   def _correct(t: VehicleTrack, s: VehicleSighting, now: float, dt: float) -> None:
@@ -222,6 +311,7 @@ class VehicleTracker:
     t.seen = now
     t.score = 0.7 * t.score + 0.3 * s.score
     t.cls, t.camera = s.cls, s.camera
+    update_brake_lights(t, s.lamp, now)
 
   def reset(self) -> None:
     self.tracks.clear()

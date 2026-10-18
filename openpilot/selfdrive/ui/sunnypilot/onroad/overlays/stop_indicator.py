@@ -17,7 +17,8 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import FT_P
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import NOTIFICATION_KINDS, DetectionEvent, EventKind, StopPhase, \
   get_detection_feed
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import LIGHT_REASON, LIGHT_RGB, current_light, draw_signal_head
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import LIGHT_REASON, LIGHT_RGB, LightState, current_light, current_stop_sign, \
+  draw_signal_head, draw_stop_sign
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import scope_rect
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -127,8 +128,11 @@ class StopCard:
     if self._phase in (StopPhase.APPROACH, StopPhase.STOPPED):
       if stop.car_ahead:
         lines.append((tr("Car ahead"), WHITE))
-      elif light is not None:
-        lines.append((tr(LIGHT_REASON[light.state]), LIGHT_RGB[light.state]))   # the cameras can tell which
+      elif light is not None:   # the cameras can tell which
+        reason = tr("Flashing red") if light.flashing and light.state == LightState.red else tr(LIGHT_REASON[light.state])
+        lines.append((reason, LIGHT_RGB[light.state]))
+      elif current_stop_sign() is not None:
+        lines.append((tr("Stop sign"), STOP_RGB))
       else:
         lines.append((tr("Light or sign"), WHITE))
     elif self._phase == StopPhase.GO:
@@ -221,7 +225,9 @@ class StopCard:
     elif self._phase == StopPhase.CLEARED:
       draw_text_centered(self._font_bold, "✓", 40, c.x, c.y, ink)
     elif (light := current_light()) is not None and not get_detection_feed().stop.car_ahead:
-      draw_signal_head(c.x, c.y, 0.72, light.state, alpha)
+      draw_signal_head(c.x, c.y, 0.72, light.state, alpha, light.arrow)
+    elif current_stop_sign() is not None and not get_detection_feed().stop.car_ahead:
+      draw_stop_sign(c.x, c.y, ICON_R, self._font_bold, alpha)
     else:
       rl.draw_rectangle_rounded(rl.Rectangle(c.x - 20, c.y - 6, 40, 12), 0.5, 6, ink)
 
@@ -254,6 +260,11 @@ EVENT_STYLE = {
   EventKind.RED_LIGHT: (tr_noop("RED LIGHT"), STOP_RGB),
   EventKind.YELLOW_LIGHT: (tr_noop("YELLOW LIGHT"), WARN_RGB),
   EventKind.LIGHT_GREEN: (tr_noop("LIGHT GREEN"), GO_RGB),
+  EventKind.PEDESTRIAN: (tr_noop("PEDESTRIAN"), STOP_RGB),
+  EventKind.MERGING: (tr_noop("MERGING"), ZONE_RGB[GapZone.CLOSE]),
+  EventKind.STOP_SIGN: (tr_noop("STOP SIGN"), STOP_RGB),
+  EventKind.BRAKING_AHEAD: (tr_noop("BRAKING AHEAD"), ZONE_RGB[GapZone.CLOSE]),
+  EventKind.FLASHING_SIGNAL: (tr_noop("FLASHING"), WARN_RGB),
 }
 
 

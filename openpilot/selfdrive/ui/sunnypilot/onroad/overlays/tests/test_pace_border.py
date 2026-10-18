@@ -13,7 +13,7 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import STOP_DISTANCE, get_t_follow
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays import detection, pace_border as pb
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.follow_ghost import desired_gap
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.tests.test_ar_overlays import overlay_env
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.tests.test_ar_overlays import next_sm_time, overlay_env
 from openpilot.selfdrive.ui.ui_state import ui_state
 
 T_FOLLOW = get_t_follow(1)  # standard personality
@@ -79,7 +79,7 @@ def feed(v_ego=25.0, a_ego=0.0, lead=None, stop_at=None, green=False):
   msgs['longitudinalPlanSP'].longitudinalPlanSP.e2eAlerts.greenLightAlert = green
   for m in msgs.values():
     m.valid = True
-  _clock[0] += 0.05
+  _clock[0] = next_sm_time(0.05)
   ui_state.sm.update_msgs(_clock[0], list(msgs.values()))
 
 

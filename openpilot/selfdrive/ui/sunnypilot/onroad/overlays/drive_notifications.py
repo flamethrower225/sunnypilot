@@ -16,6 +16,11 @@ Drive notifications: short advisories in a card at the top right, for things wor
   Red light        a red light ahead the car isn't braking enough for     } with Camera Object Detection on
   Yellow light     it just turned yellow: room to stop or not             }
   Light is green   stopped at a red that turned green                     }
+  Flashing signal  flashing red (stop, then go) or yellow (caution)       }
+  Stop sign        a stop sign ahead the car isn't braking enough for     }
+  Pedestrian       someone walking or cycling in our path                 }
+  Braking ahead    brake lights past the car we follow                    }
+  Merging          a car in the next lane drifting into ours              }
 
 One card at a time, the most important first. Each kind has a cooldown so nothing nags, and nothing shows while you are already
 changing lanes. The logic below works on a DriveSnapshot and has no drawing in it; DriveNotifications reads one from the
@@ -39,13 +44,16 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import FT_PER_M, SNAP_DISTANCE, GapZone
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.curve_hologram import curve_ahead, curve_decel_needed
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import DetectionEvent, EventKind, get_detection_feed
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import current_light, draw_signal_head
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import service_fresh
+from openpilot.selfdrive.ui.sunnypilot.model_plan import model_plan
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import camera_people, current_light, current_stop_sign, draw_signal_head, \
+  draw_stop_sign
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import RADAR_TO_CAMERA, service_fresh
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode as SpeedLimitMode
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
+from openpilot.system.ui.lib.wrap_text import wrap_text
 
 LaneChangeState = log.LaneChangeState
 MPH = CV.MPH_TO_MS
@@ -85,6 +93,7 @@ BREAK_AFTER = 2 * 3600.0         # s on the road
 
 # traffic lights (Camera Object Detection)
 LIGHT_RED, LIGHT_YELLOW, LIGHT_GREEN = 1, 2, 3
+KIND_CYCLIST = 5                 # SceneDetectionSP.VehicleKind.cyclist
 LIGHT_SETBACK = 10.0             # m, the stop line is about this far before the light
 LIGHT_RANGE = (8.0, 150.0)       # m
 LIGHT_MIN_SPEED = 15 * MPH
@@ -95,6 +104,20 @@ YELLOW_COMFORT_DECEL = 3.0       # m/s^2
 GREEN_FRESH = 2.0                # s
 GREEN_STOPPED_SPEED = 1.0        # m/s
 CAMERA_BESIDE = (-8.0, 25.0)     # m from the bumper: a camera car this close in the next lane blocks a lane change
+SIGN_RANGE = (5.0, 100.0)        # m
+SIGN_MIN_SPEED = 15 * MPH
+FLASH_MIN_SPEED = 3.0            # m/s
+PERSON_MIN_SPEED = 2.0           # m/s
+PERSON_NEAR = 15.0               # m, this close in our path always counts
+PERSON_TTC = 6.0                 # s
+PERSON_RANGE = 45.0              # m
+PERSON_PATH = 2.2                # m either side of the planned path
+BRAKING_MIN_SPEED = 8.0          # m/s
+BRAKING_SUSTAIN = 0.3            # s
+BRAKING_PAST_LEAD = 5.0          # m: a braking car this far past the lead is one the lead hides
+BRAKING_RANGE = 100.0            # m
+MERGING_MIN_SPEED = 5.0          # m/s
+MERGING_RANGE = (-5.0, 40.0)     # m from the bumper
 
 CARD_TTL_MIN = 3.0               # s a card stays at least, even when its reason is gone
 
@@ -102,14 +125,19 @@ CARD_TTL_MIN = 3.0               # s a card stays at least, even when its reason
 class NotifyKind(IntEnum):
   # in order of priority, most important first
   STOPPED_TRAFFIC = 0
-  RED_LIGHT = 1
-  SHARP_CURVE = 2
-  YELLOW_LIGHT = 3
-  LIGHT_GREEN = 4
-  SLOW_LEAD = 5
-  OVER_LIMIT = 6
-  SPEED_LIMIT = 7
-  BREAK = 8
+  PEDESTRIAN = 1
+  MERGING = 2
+  RED_LIGHT = 3
+  STOP_SIGN = 4
+  BRAKING_AHEAD = 5
+  SHARP_CURVE = 6
+  FLASHING_SIGNAL = 7
+  YELLOW_LIGHT = 8
+  LIGHT_GREEN = 9
+  SLOW_LEAD = 10
+  OVER_LIMIT = 11
+  SPEED_LIMIT = 12
+  BREAK = 13
 
 
 class Icon(IntEnum):
@@ -125,6 +153,8 @@ class Icon(IntEnum):
   SIGNAL_RED = 9
   SIGNAL_YELLOW = 10
   SIGNAL_GREEN = 11
+  STOP_SIGN = 12
+  PERSON = 13
 
 
 @dataclass(frozen=True)
@@ -166,6 +196,15 @@ class DriveSnapshot:
   light_age: float = 0.0           # s the state has held
   left_busy: bool = False          # the cameras see a car in the lane beside us, just behind to a little ahead
   right_busy: bool = False
+  light_stop_distance: float = math.nan   # m to where we'd stop for the light (light_view.fused_stop_distance)
+  light_flashing: bool = False
+  sign_stop_distance: float = math.nan    # m to where we'd stop for a stop sign, NaN when there's none
+  person_distance: float = math.nan       # m to the nearest pedestrian or cyclist in our path
+  person_ttc: float = math.inf            # s until we reach them at the speeds now
+  person_cyclist: bool = False
+  braking_ahead: float = math.nan         # m to the nearest car in our lane past the lead whose brake lights are on
+  merging_side: int = 0                   # a car merging into our lane: -1 from the left, 1 from the right
+  merging_distance: float = math.nan
 
 
 # ---- formatting ----
@@ -375,9 +414,13 @@ class BreakRule(Rule):
     self._next += BREAK_AFTER
 
 
-def light_stop_decel(v_ego: float, light_distance: float) -> float:
-  """m/s^2 to stop LIGHT_SETBACK short of a light (the stop line is before it)."""
-  return v_ego ** 2 / (2 * max(light_distance - LIGHT_SETBACK, 1.0))
+def light_stop_decel(v_ego: float, stop_distance: float) -> float:
+  """m/s^2 to stop in stop_distance (to the stop line, see light_view.fused_stop_distance)."""
+  return v_ego ** 2 / (2 * max(stop_distance, 1.0))
+
+
+def stop_distance_of(s: DriveSnapshot) -> float:
+  return s.light_stop_distance if math.isfinite(s.light_stop_distance) else max(s.light_distance - LIGHT_SETBACK, 0.0)
 
 
 class RedLightRule(Rule):
@@ -391,8 +434,9 @@ class RedLightRule(Rule):
     self._since: float | None = None
 
   def check(self, s: DriveSnapshot) -> Notification | None:
-    hot = (s.light_state == LIGHT_RED and math.isfinite(s.light_distance) and LIGHT_RANGE[0] <= s.light_distance <= LIGHT_RANGE[1]
-           and s.v_ego > LIGHT_MIN_SPEED and light_stop_decel(s.v_ego, s.light_distance) > max(-s.a_ego, 0.0) + LIGHT_DECEL_MARGIN)
+    hot = (s.light_state == LIGHT_RED and not s.light_flashing and math.isfinite(s.light_distance)
+           and LIGHT_RANGE[0] <= s.light_distance <= LIGHT_RANGE[1] and s.v_ego > LIGHT_MIN_SPEED
+           and light_stop_decel(s.v_ego, stop_distance_of(s)) > max(-s.a_ego, 0.0) + LIGHT_DECEL_MARGIN)
     if not hot:
       self._since = None
       return None
@@ -400,7 +444,7 @@ class RedLightRule(Rule):
     if s.now - self._since < LIGHT_SUSTAIN:
       return None
     return Notification(self.kind, tr("RED LIGHT"), tr("Red light ahead"),
-                        tr("Stop in {}").format(distance_text(max(s.light_distance - LIGHT_SETBACK, 0.0), s.is_metric)),
+                        tr("Stop in {}").format(distance_text(stop_distance_of(s), s.is_metric)),
                         ZONE_RGB[GapZone.CRITICAL], Icon.SIGNAL_RED, None, s.light_distance)
 
 
@@ -411,10 +455,10 @@ class YellowLightRule(Rule):
   cooldown = 15.0
 
   def check(self, s: DriveSnapshot) -> Notification | None:
-    if not (s.light_state == LIGHT_YELLOW and s.light_age < YELLOW_FRESH and math.isfinite(s.light_distance)
+    if not (s.light_state == LIGHT_YELLOW and not s.light_flashing and s.light_age < YELLOW_FRESH and math.isfinite(s.light_distance)
             and LIGHT_RANGE[0] <= s.light_distance <= LIGHT_RANGE[1] and s.v_ego > LIGHT_MIN_SPEED):
       return None
-    need = light_stop_decel(s.v_ego, s.light_distance)
+    need = light_stop_decel(s.v_ego, stop_distance_of(s))
     text = tr("Room to stop") if need <= YELLOW_COMFORT_DECEL else tr("Too close to stop gently")
     return Notification(self.kind, tr("YELLOW LIGHT"), text, distance_text(s.light_distance, s.is_metric), ZONE_RGB[GapZone.CAUTION],
                         Icon.SIGNAL_YELLOW, None, s.light_distance)
@@ -445,9 +489,104 @@ class LightGreenRule(Rule):
     self._red_while_stopped = False
 
 
+class StopSignRule(Rule):
+  """Coming up on a stop sign faster than the braking so far will stop for."""
+  kind = NotifyKind.STOP_SIGN
+  ttl = 8.0
+  cooldown = 15.0
+  sticky = True
+
+  def __init__(self):
+    self._since: float | None = None
+
+  def check(self, s: DriveSnapshot) -> Notification | None:
+    d = s.sign_stop_distance
+    hot = (math.isfinite(d) and SIGN_RANGE[0] <= d <= SIGN_RANGE[1] and s.v_ego > SIGN_MIN_SPEED
+           and light_stop_decel(s.v_ego, d) > max(-s.a_ego, 0.0) + LIGHT_DECEL_MARGIN)
+    if not hot:
+      self._since = None
+      return None
+    self._since = s.now if self._since is None else self._since
+    if s.now - self._since < LIGHT_SUSTAIN:
+      return None
+    return Notification(self.kind, tr("STOP SIGN"), tr("Stop sign ahead"), tr("Stop in {}").format(distance_text(d, s.is_metric)),
+                        ZONE_RGB[GapZone.CRITICAL], Icon.STOP_SIGN, None, d)
+
+
+class FlashingSignalRule(Rule):
+  """A flashing signal ahead, said once per approach: flashing red is a stop sign, flashing yellow is caution."""
+  kind = NotifyKind.FLASHING_SIGNAL
+  ttl = 6.0
+  cooldown = 30.0
+
+  def check(self, s: DriveSnapshot) -> Notification | None:
+    if not (s.light_flashing and s.light_state in (LIGHT_RED, LIGHT_YELLOW) and s.v_ego > FLASH_MIN_SPEED
+            and math.isfinite(s.light_distance) and s.light_distance <= LIGHT_RANGE[1]):
+      return None
+    if s.light_state == LIGHT_RED:
+      return Notification(self.kind, tr("FLASHING RED"), tr("Stop, then go when clear"), distance_text(s.light_distance, s.is_metric),
+                          ZONE_RGB[GapZone.CRITICAL], Icon.SIGNAL_RED, LIGHT_RED, s.light_distance)
+    return Notification(self.kind, tr("FLASHING YELLOW"), tr("Proceed with caution"), distance_text(s.light_distance, s.is_metric),
+                        ZONE_RGB[GapZone.CAUTION], Icon.SIGNAL_YELLOW, LIGHT_YELLOW, s.light_distance)
+
+
+class PedestrianRule(Rule):
+  """Someone walking or cycling in our path, close or soon to be."""
+  kind = NotifyKind.PEDESTRIAN
+  ttl = 6.0
+  cooldown = 8.0
+  sticky = True
+
+  def check(self, s: DriveSnapshot) -> Notification | None:
+    d = s.person_distance
+    if not (math.isfinite(d) and s.v_ego > PERSON_MIN_SPEED and (d <= PERSON_NEAR or s.person_ttc <= PERSON_TTC)):
+      return None
+    text = tr("Cyclist ahead") if s.person_cyclist else tr("Pedestrian ahead")
+    return Notification(self.kind, tr("CYCLIST") if s.person_cyclist else tr("PEDESTRIAN"), text, distance_text(d, s.is_metric),
+                        ZONE_RGB[GapZone.CRITICAL], Icon.PERSON, None, d)
+
+
+class BrakingAheadRule(Rule):
+  """Brake lights past the car we follow: the cars ahead of it are slowing before it does."""
+  kind = NotifyKind.BRAKING_AHEAD
+  ttl = 4.0
+  cooldown = 12.0
+
+  def __init__(self):
+    self._since: float | None = None
+
+  def check(self, s: DriveSnapshot) -> Notification | None:
+    if not (math.isfinite(s.braking_ahead) and s.v_ego > BRAKING_MIN_SPEED):
+      self._since = None
+      return None
+    self._since = s.now if self._since is None else self._since
+    if s.now - self._since < BRAKING_SUSTAIN:
+      return None
+    return Notification(self.kind, tr("TRAFFIC"), tr("Brake lights ahead"), distance_text(s.braking_ahead, s.is_metric),
+                        ZONE_RGB[GapZone.CLOSE], Icon.DOWN, None, s.braking_ahead)
+
+
+class MergingRule(Rule):
+  """A car in the next lane drifting into ours."""
+  kind = NotifyKind.MERGING
+  ttl = 6.0
+  cooldown = 8.0
+  sticky = True
+
+  def check(self, s: DriveSnapshot) -> Notification | None:
+    if s.merging_side == 0 or s.v_ego < MERGING_MIN_SPEED:
+      return None
+    text = tr("From the left") if s.merging_side < 0 else tr("From the right")
+    detail = distance_text(max(s.merging_distance, 0.0), s.is_metric) if math.isfinite(s.merging_distance) else ""
+    # the arrow shows the way it's coming: from the left it moves right
+    return Notification(self.kind, tr("CAR MERGING"), text, detail, ZONE_RGB[GapZone.CLOSE], Icon.RIGHT if s.merging_side < 0 else Icon.LEFT,
+                        s.merging_side, s.merging_distance)
+
+
 def default_rules() -> list[Rule]:
-  rules: list[Rule] = [StoppedTrafficRule(), RedLightRule(), SharpCurveRule(), YellowLightRule(), LightGreenRule(), SlowLeadRule(),
-                       OverLimitRule(), SpeedLimitRule(), BreakRule()]
+  rules: list[Rule] = [StoppedTrafficRule(), PedestrianRule(), MergingRule(), RedLightRule(), StopSignRule(), BrakingAheadRule(),
+                       SharpCurveRule(), FlashingSignalRule(), YellowLightRule(), LightGreenRule(), SlowLeadRule(), OverLimitRule(),
+                       SpeedLimitRule(), BreakRule()]
   return sorted(rules, key=lambda r: r.kind)
 
 
@@ -551,7 +690,9 @@ def read_snapshot(sm, now: float) -> DriveSnapshot:
   curve = curve_ahead(sm, started)
 
   light = current_light(sm)
+  sign = current_stop_sign(sm)
   left_busy = right_busy = False
+  braking_ahead, merging_side, merging_distance = math.nan, 0, math.nan
   if ui_state.scene_detection and service_fresh(sm, 'sceneDetectionSP', started):
     for v in sm['sceneDetectionSP'].vehicles:
       if v.lastSeen > 1.0:
@@ -562,6 +703,11 @@ def read_snapshot(sm, now: float) -> DriveSnapshot:
       elif v.lane == 1:
         right_lane = True
         right_busy |= CAMERA_BESIDE[0] <= v.dRel <= CAMERA_BESIDE[1]
+      if v.braking and v.lane == 0 and v.dRel <= BRAKING_RANGE and (not lead_ok or v.dRel > lead.dRel + BRAKING_PAST_LEAD):
+        braking_ahead = v.dRel if not math.isfinite(braking_ahead) else min(braking_ahead, v.dRel)
+      if v.merging and MERGING_RANGE[0] <= v.dRel <= MERGING_RANGE[1] and (not math.isfinite(merging_distance) or v.dRel < merging_distance):
+        merging_side, merging_distance = (-1 if v.yRel > 0 else 1), float(v.dRel)
+  person_distance, person_ttc, person_cyclist = person_in_path(sm, started, v_ego)
 
   lane_change = sm['modelV2'].meta.laneChangeState if sm.recv_frame['modelV2'] >= started else LaneChangeState.off
   return DriveSnapshot(
@@ -574,11 +720,44 @@ def read_snapshot(sm, now: float) -> DriveSnapshot:
     drive_time=now - ui_state.started_time if ui_state.started_time else 0.0,
     light_state=light.state if light else 0, light_distance=light.distance if light else math.nan, light_age=light.age if light else 0.0,
     left_busy=left_busy, right_busy=right_busy,
+    light_stop_distance=light.stop_distance if light else math.nan, light_flashing=light.flashing if light else False,
+    sign_stop_distance=sign.stop_distance if sign else math.nan,
+    person_distance=person_distance, person_ttc=person_ttc, person_cyclist=person_cyclist,
+    braking_ahead=braking_ahead, merging_side=merging_side, merging_distance=merging_distance,
   )
+
+
+def person_in_path(sm, started: int, v_ego: float) -> tuple[float, float, bool]:
+  """(distance, time to reach, cyclist) of the nearest pedestrian or cyclist within PERSON_PATH of the planned path."""
+  best = (math.nan, math.inf, False)
+  people = camera_people(sm)
+  if not people:
+    return best
+  plan = model_plan(sm, started)
+  for p in people:
+    if not 0.0 < p.dRel <= PERSON_RANGE:
+      continue
+    path_y = float(np.interp(p.dRel + RADAR_TO_CAMERA, plan.x, plan.y)) if plan.size else 0.0
+    if abs(-p.yRel - path_y) > PERSON_PATH:
+      continue
+    closing = max(-p.vRel, v_ego * 0.5)
+    ttc = p.dRel / closing if closing > 0.5 else math.inf
+    if not math.isfinite(best[0]) or p.dRel < best[0]:
+      best = (float(p.dRel), ttc, _raw_kind(p) == KIND_CYCLIST)
+  return best
+
+
+def _raw_kind(p) -> int:
+  return int(p.kind.raw if hasattr(p.kind, "raw") else p.kind)
 
 
 LOG_KINDS = {
   NotifyKind.STOPPED_TRAFFIC: EventKind.STOPPED_TRAFFIC,
+  NotifyKind.PEDESTRIAN: EventKind.PEDESTRIAN,
+  NotifyKind.MERGING: EventKind.MERGING,
+  NotifyKind.STOP_SIGN: EventKind.STOP_SIGN,
+  NotifyKind.BRAKING_AHEAD: EventKind.BRAKING_AHEAD,
+  NotifyKind.FLASHING_SIGNAL: EventKind.FLASHING_SIGNAL,
   NotifyKind.RED_LIGHT: EventKind.RED_LIGHT,
   NotifyKind.YELLOW_LIGHT: EventKind.YELLOW_LIGHT,
   NotifyKind.LIGHT_GREEN: EventKind.LIGHT_GREEN,
@@ -608,6 +787,7 @@ TITLE_SIZE = TEXT_MIN
 TEXT_SIZE = 48
 DETAIL_SIZE = TEXT_MIN
 LINE_GAP = 4.0
+MAX_TEXT_LINES = 2
 ACCENT_W = 8.0
 SLIDE = 40.0              # px the card slides in from
 
@@ -655,10 +835,14 @@ class DriveNotifications:
     text_size = TEXT_SIZE
     while text_size > TEXT_MIN and measure_text_cached(self._font_bold, note.text, text_size).x > room:
       text_size -= 2
+    lines = [note.text]
+    if measure_text_cached(self._font_bold, note.text, text_size).x > room:   # too long even at the smallest size: two lines
+      lines = wrap_text(self._font_bold, note.text, text_size, int(room))[:MAX_TEXT_LINES]
     detail = note.detail
     while detail and measure_text_cached(self._font_semi, detail, DETAIL_SIZE).x > room:
       detail = detail.rsplit(" ", 1)[0] if " " in detail else ""
-    h = PAD + TITLE_SIZE + LINE_GAP + text_size + (LINE_GAP + DETAIL_SIZE if detail else 0) + PAD
+    text_h = len(lines) * text_size + (len(lines) - 1) * LINE_GAP
+    h = PAD + TITLE_SIZE + LINE_GAP + text_h + (LINE_GAP + DETAIL_SIZE if detail else 0) + PAD
 
     card = rl.Rectangle(x, y, w, h)
     r = roundness(22, w, h)
@@ -679,9 +863,11 @@ class DriveNotifications:
     ty = y + PAD
     draw_text(self._font_bold, note.title, TITLE_SIZE, text_x, ty, rgba(note.rgb, alpha), spacing=1.5)
     ty += TITLE_SIZE + LINE_GAP
-    draw_text(self._font_bold, note.text, text_size, text_x, ty, rgba(WHITE, alpha))
+    for line in lines:
+      draw_text(self._font_bold, line, text_size, text_x, ty, rgba(WHITE, alpha))
+      ty += text_size + LINE_GAP
     if detail:
-      draw_text(self._font_semi, detail, DETAIL_SIZE, text_x, ty + text_size + LINE_GAP, rgba(WHITE, 0.75 * alpha))
+      draw_text(self._font_semi, detail, DETAIL_SIZE, text_x, ty, rgba(WHITE, 0.75 * alpha))
 
   def _draw_icon(self, c: rl.Vector2, note: Notification, alpha: float) -> None:
     rl.draw_circle_v(c, ICON_R, rgba(note.rgb, alpha))
@@ -704,6 +890,13 @@ class DriveNotifications:
       rl.draw_ring(c, 18, 24, 0, 360, 32, ink)
       rl.draw_line_ex(c, rl.Vector2(cx, cy - 13), 5, ink)
       rl.draw_line_ex(c, rl.Vector2(cx + 10, cy), 5, ink)
+    elif icon == Icon.STOP_SIGN:
+      draw_stop_sign(cx, cy, 26, self._font_bold, alpha)
+    elif icon == Icon.PERSON:
+      rl.draw_circle_v(rl.Vector2(cx, cy - 14), 7, ink)
+      rl.draw_rectangle_rounded(rl.Rectangle(cx - 7, cy - 5, 14, 18), 0.5, 6, ink)
+      rl.draw_line_ex(rl.Vector2(cx - 3, cy + 11), rl.Vector2(cx - 8, cy + 23), 5, ink)
+      rl.draw_line_ex(rl.Vector2(cx + 3, cy + 11), rl.Vector2(cx + 8, cy + 23), 5, ink)
     elif icon in (Icon.SIGNAL_RED, Icon.SIGNAL_YELLOW, Icon.SIGNAL_GREEN):
       rl.draw_circle_v(c, ICON_R, rgba(BLACK, alpha))   # a signal head reads best on black
       draw_signal_head(cx, cy, 0.72, {Icon.SIGNAL_RED: 1, Icon.SIGNAL_YELLOW: 2, Icon.SIGNAL_GREEN: 3}[icon], alpha)

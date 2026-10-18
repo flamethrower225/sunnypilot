@@ -187,16 +187,19 @@ class VisualsLayout(Widget):
         lambda: tr("Drive Notifications"),
         tr("Short advisories at the top right: pass a lead that is well under the speed limit (on the side with an open lane and " +
            "no car in the blind spot), stopped traffic ahead while you are still at speed, a sharp curve you aren't slowing for, " +
-           "a new speed limit, speeding well over it, and a break after two hours. One at a time, each with a cooldown, and " +
-           "each is also listed in the Detection Log."),
+           "a new speed limit, speeding well over it, and a break after two hours. With Camera Object Detection on, also red, " +
+           "yellow, green and flashing lights, stop signs, a pedestrian or cyclist in your path, brake lights ahead and a car " +
+           "merging into your lane. One at a time, each with a cooldown, and each is also listed in the Detection Log."),
       ),
       "SceneDetection": (
         lambda: tr("Camera Object Detection"),
-        tr("Run an object detector on the road cameras, next to the driving model, to read traffic lights and find the cars " +
-           "around you. The light shows in a chip at the top left (red, yellow or green, and how far), names the light on the " +
-           "stop card, feeds Pace Border and adds red light, yellow light and green light notifications. Cars it finds show " +
-           "as rounded squares on the radar scope and in the threat board and brackets, and a car beside you holds back the " +
-           "pass suggestion. It slows itself down whenever the driving model needs the time. Advisory only: it doesn't " +
+        tr("Run an object detector on the road cameras, next to the driving model, to read traffic lights (with turn arrows " +
+           "and flashing signals), stop signs, pedestrians, cyclists and the cars around you, including their brake lights and " +
+           "a car drifting into your lane. The light or stop sign shows in a chip at the top left (with how long you have waited " +
+           "at a red), names the stop on the stop card, feeds Pace Border and adds notifications. Cars show as rounded squares " +
+           "on the radar scope (with brake lamps, and a chevron when merging), people as amber figures. Distances calibrate " +
+           "themselves against the radar. It slows itself down whenever the driving model needs the time; Developer > Camera " +
+           "Detection Status shows how it ran. Advisory only: it doesn't " +
            "change how openpilot drives. Takes effect on the next drive."),
       ),
       "HardBrakeFlash": (

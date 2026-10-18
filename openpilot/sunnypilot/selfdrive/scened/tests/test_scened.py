@@ -10,7 +10,8 @@ from openpilot.sunnypilot.selfdrive.scened import detector as det
 from openpilot.sunnypilot.selfdrive.scened.detector import Detection, ObjectClass, decode, nms
 from openpilot.sunnypilot.selfdrive.scened.frames import INPUT_SIZE, NV12Sampler, Region, clamp_region, rgb_to_nv12
 from openpilot.sunnypilot.selfdrive.scened.geometry import camera_geometry
-from openpilot.sunnypilot.selfdrive.scened.scened import PASSES, PlanView, SceneDetection, Throttle, lights_region, MIN_PASS_HZ, PASS_HZ
+from openpilot.sunnypilot.selfdrive.scened.scened import PASSES, Context, PlanView, SceneDetection, Throttle, lights_region, MIN_PASS_HZ, \
+  PASS_HZ
 from openpilot.sunnypilot.selfdrive.scened.traffic_lights import LightColor, LightObservation, TrafficLightFilter, estimate_distance, \
   read_lamp, relevant
 from openpilot.sunnypilot.selfdrive.scened.vehicle_tracker import VehicleSighting, VehicleTracker, ego_motion, lane_index, sightings_from
@@ -82,10 +83,10 @@ class TestDecode:
     assert abs(d.x0 - (100 + (4 - 20) / r)) < 1e-3 and abs(d.y1 - (50 + (4 + 12) / r)) < 1e-3
 
   def test_unused_classes_and_weak_boxes_are_dropped(self):
-    raw = self.raw_with({0: (0.5, 0.5, 40, 24, 0, 0.95), 1: (0.5, 0.5, 40, 24, ObjectClass.CAR, 0.2),
+    raw = self.raw_with({0: (0.5, 0.5, 40, 24, 15, 0.95), 1: (0.5, 0.5, 40, 24, ObjectClass.CAR, 0.2),
                          2: (0.5, 0.5, 10, 30, ObjectClass.TRAFFIC_LIGHT, 0.28)})
     dets = decode(raw, Region(0, 0, INPUT_SIZE, INPUT_SIZE))
-    assert [d.cls for d in dets] == [ObjectClass.TRAFFIC_LIGHT]   # person dropped, weak car dropped, light kept at its lower bar
+    assert [d.cls for d in dets] == [ObjectClass.TRAFFIC_LIGHT]   # a cat dropped, weak car dropped, light kept at its lower bar
 
   def test_nms(self):
     boxes = np.array([[0, 0, 10, 10], [1, 1, 11, 11], [50, 50, 60, 60]], float)
@@ -294,7 +295,7 @@ class TestSceneDetection:
     t = 0.0
     for spec in PASSES * 2:
       if spec.camera == 0:
-        scene.run_pass(spec, buf, sampler, ROAD_GEO, PlanView(), t, 0.0)
+        scene.run_pass(spec, buf, sampler, ROAD_GEO, PlanView(), Context(t))
       t += 0.17
     msg = scene.message(t, PlanView(), 7, "road", 0.01, 6.0, False, True).sceneDetectionSP
     assert msg.trafficLight.state == "green" and abs(msg.trafficLight.distance - (45 - 1.52)) < 6
