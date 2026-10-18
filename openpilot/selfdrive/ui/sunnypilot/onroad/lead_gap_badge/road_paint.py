@@ -7,7 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 import numpy as np
 import pyray as rl
 
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE, clamp
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import LeadGapReading, primary_value, speed_value
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -130,4 +130,4 @@ class RoadPaint:
 
 
 def rgba_tuple(rgb, alpha: float) -> tuple[int, int, int, int]:
-  return int(rgb[0]), int(rgb[1]), int(rgb[2]), int(np.clip(alpha, 0.0, 1.0) * 255)
+  return int(rgb[0]), int(rgb[1]), int(rgb[2]), int(clamp(alpha, 0.0, 1.0) * 255)

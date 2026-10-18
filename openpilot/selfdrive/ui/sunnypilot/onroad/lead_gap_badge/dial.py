@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pyray as rl
 
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, TEXT_MIN, WHITE, ZONE_RGB, GaugeScale, rgba, gauge_scale, \
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, TEXT_MIN, WHITE, ZONE_RGB, GaugeScale, clamp, rgba, gauge_scale, \
   zone_label, draw_text_centered, draw_arc, draw_delta_arrow, draw_value_with_unit, measure_value_with_unit
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import LeadGapReading, primary_value, speed_value, speed_delta
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -32,7 +32,7 @@ DISTANCE_TICKS_IMPERIAL = (0, 20, 40, 60)   # ft, at a crawl
 
 
 def scale_angle(value: float, scale: GaugeScale) -> float:
-  return START_ANGLE + SWEEP * float(np.clip(value / scale.max_value, 0.0, 1.0))
+  return START_ANGLE + SWEEP * clamp(value / scale.max_value, 0.0, 1.0)
 
 
 class GapDial:

@@ -6,11 +6,10 @@ See the LICENSE.md file in the root directory for more details.
 """
 import math
 
-import numpy as np
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import INK, STROKE_MIN, TEXT_MIN, WHITE, draw_text, rgba
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import INK, STROKE_MIN, TEXT_MIN, WHITE, clamp, draw_text, rgba
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import STOP_DISTANCE, get_t_follow
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -58,8 +57,8 @@ def ghost_distance(d_rel: float, v_ego: float, v_lead: float, t_follow: float) -
 def ghost_visibility(x_ghost: float) -> float:
   """0 when the ghost is within GHOST_MIN_X of the bumper (we are there), rising to 1 at GHOST_FULL_X, and fading out
   again when it is too far away to read."""
-  near = np.clip((x_ghost - GHOST_MIN_X) / (GHOST_FULL_X - GHOST_MIN_X), 0.0, 1.0)
-  far = np.clip((GHOST_FAR_X[1] - x_ghost) / (GHOST_FAR_X[1] - GHOST_FAR_X[0]), 0.0, 1.0)
+  near = clamp((x_ghost - GHOST_MIN_X) / (GHOST_FULL_X - GHOST_MIN_X), 0.0, 1.0)
+  far = clamp((GHOST_FAR_X[1] - x_ghost) / (GHOST_FAR_X[1] - GHOST_FAR_X[0]), 0.0, 1.0)
   return float(near * far)
 
 
@@ -153,9 +152,9 @@ class FollowGhost:
     heading = math.atan((float(projector.path_y(x_c + 1.0)) - float(projector.path_y(max(x_c - 1.0, 0.1)))) / 2.0)
 
     def project(local: list[tuple[float, float]], height: float = 0.0) -> list[tuple[float, float]] | None:
-      projected = [projector.to_screen(px, py, height) for px, py in place(local, x_c, y_c, heading)]
-      pts = [p for p in projected if p is not None]
-      return pts if len(pts) == len(projected) else None
+      xs, ys = zip(*place(local, x_c, y_c, heading), strict=True)
+      screen, ok = projector.to_screen_many(xs, ys, height)
+      return [(float(x), float(y)) for x, y in screen] if ok.all() else None
 
     shape = footprint_outline(length, GHOST_WIDTH, GHOST_CORNER)
     outline, rim = project(shape), project(shape, GHOST_SKIRT)
@@ -165,7 +164,7 @@ class FollowGhost:
 
     now = rl.get_time()
     px_per_m = math.hypot(front[1][0] - front[0][0], front[1][1] - front[0][1]) / (GHOST_WIDTH - 2 * GHOST_CORNER)
-    th = float(np.clip(0.06 * px_per_m, 5.0, 10.0))
+    th = clamp(0.06 * px_per_m, 5.0, 10.0)
 
     # soft fill with a sheen that sweeps from the rear to the front now and then
     _fill_convex(outline, rgba(CYAN, 0.15 * alpha))

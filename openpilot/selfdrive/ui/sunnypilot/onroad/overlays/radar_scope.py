@@ -17,7 +17,8 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import get_bottom_dev
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, DOT_MIN, INK, WHITE, ZONE_RGB, rgba, draw_triangle, \
   roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, FT_PER_M
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import CLASS_RGB, RadarFeed, RadarTrack, TrackClass, display_zone
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import CLASS_RGB, RadarFeed, RadarTrack, TrackClass, display_zone, \
+  shared_radar_feed
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
 
@@ -49,6 +50,8 @@ LANE_WIDTH_OURS, LANE_WIDTH_OTHER = 7.0, 4.5
 RING_WIDTH = 3.0
 TICK_WIDTH = 6.0
 LEAD_RING_RADIUS, LEAD_RING_WIDTH = 23.0, 6.0
+BLINDSPOT_LATERAL = (2.2, 5.0)     # m from our centerline, the lane beside us
+BLINDSPOT_AHEAD = 4.0              # m past the bumper the lit zone reaches
 
 
 @dataclass(frozen=True)
@@ -102,33 +105,57 @@ def ring_points(radius: float, step: float = 1.5) -> list[tuple[float, float]]:
   return points
 
 
+def runs(mask: np.ndarray) -> list[tuple[int, int]]:
+  """[start, end) of every run of at least two consecutive True values."""
+  edges = np.flatnonzero(np.diff(np.concatenate(([0], mask.astype(np.int8), [0]))))
+  return [(int(a), int(b)) for a, b in zip(edges[0::2], edges[1::2], strict=True) if b - a >= 2]
+
+
+def draw_polyline(points: list, thickness: float, color: rl.Color) -> None:
+  """A thick polyline in one draw call. The points can be plain (x, y) pairs, cffi converts them without building Vector2s."""
+  if len(points) >= 2:
+    rl.draw_spline_linear(points, len(points), thickness, color)
+
+
 class RadarScope:
   """Top-down minimap: lane lines from the model, range rings, and a dot per radar track.
   Dots are cyan when moving the same way, gray when stationary, hollow pink when oncoming, and severity colored when closing on us.
   The lead has a solid ring, the second lead a dashed one, and a tick on each moving dot points the way it's pulling (up is faster than us)."""
 
   def __init__(self):
-    dt = 1 / gui_app.target_fps
-    self._feed = RadarFeed(dt)
+    dt = self._dt = 1 / gui_app.target_fps
+    self._feed = RadarFeed(dt)  # until the first update hands over the shared one
     self._alpha = FirstOrderFilter(0.0, 0.2, dt)
     self._lane_y: np.ndarray | None = None     # (4, LANE_SAMPLES) lateral position at LANE_DISTANCES, NaN where the model has none
     self._lane_alpha = np.zeros(4)
+    self._rings_key: tuple | None = None
+    self._blindspots = (FirstOrderFilter(0.0, 0.1, dt), FirstOrderFilter(0.0, 0.1, dt))  # left, right
+    self._lanes_model = None
+    self._rings: list[tuple[rl.Vector2, rl.Vector2]] = []
 
   def update(self) -> None:
     if not ui_state.radar_scope:
       self._alpha.x = 0.0
       return
     sm = ui_state.sm
-    self._feed.update(sm, ui_state.started_frame)
+    self._feed = shared_radar_feed(sm, ui_state.started_frame, self._dt)
+    cs = sm['carState']
+    fresh = sm.recv_frame['carState'] >= ui_state.started_frame
+    self._blindspots[0].update(1.0 if fresh and cs.leftBlindspot else 0.0)
+    self._blindspots[1].update(1.0 if fresh and cs.rightBlindspot else 0.0)
     self._alpha.update(1.0 if self._feed.available else 0.0)
     if self._alpha.x > 0.01:
       self._update_lanes(sm)
 
   def _update_lanes(self, sm) -> None:
-    self._lane_y = None
     if sm.recv_frame['modelV2'] < ui_state.started_frame:
+      self._lane_y, self._lanes_model = None, None
       return
     model = sm['modelV2']
+    if model is self._lanes_model:  # lane lines only change with a new model frame
+      return
+    self._lanes_model = model
+    self._lane_y = None
     lines = model.laneLines
     if len(lines) < 4:
       return
@@ -159,55 +186,70 @@ class RadarScope:
     rl.draw_rectangle_rounded_lines_ex(panel, roundness(22, panel.width, panel.height), 16, 3, rgba(WHITE, 0.28 * alpha))
     self._draw_rings(frame, ui_state.is_metric, now, alpha)
     self._draw_lanes(frame, alpha)
+    self._draw_blindspots(frame, now, alpha)
     self._draw_tracks(frame, now, alpha)
     self._draw_ego(frame, alpha)
 
-  def _draw_ring(self, frame: ScopeFrame, radius: float, thickness: float, color: rl.Color, dashed: bool = False) -> None:
-    pts = [frame.project(d, y) for d, y in ring_points(radius)]
-    for i in range(len(pts) - 1):
-      if dashed and i % 2:
-        continue
-      rl.draw_line_ex(rl.Vector2(*pts[i]), rl.Vector2(*pts[i + 1]), thickness, color)
+  def _ring_dashes(self, frame: ScopeFrame, is_metric: bool) -> list[tuple[rl.Vector2, rl.Vector2]]:
+    """The dashes of the range rings, which only move when the panel does, so they are built once instead of every frame."""
+    key = (frame, is_metric)
+    if key != self._rings_key:
+      dashes = []
+      for radius in ring_radii(is_metric):
+        pts = [rl.Vector2(*frame.project(d, y)) for d, y in ring_points(radius)]
+        dashes += [(pts[i], pts[i + 1]) for i in range(0, len(pts) - 1, 2)]
+      self._rings_key, self._rings = key, dashes
+    return self._rings
 
   def _draw_rings(self, frame: ScopeFrame, is_metric: bool, now: float, alpha: float) -> None:
-    for radius in ring_radii(is_metric):
-      self._draw_ring(frame, radius, RING_WIDTH, rgba(WHITE, 0.2 * alpha), dashed=True)
+    color = rgba(WHITE, 0.2 * alpha)
+    for a, b in self._ring_dashes(frame, is_metric):
+      rl.draw_line_ex(a, b, RING_WIDTH, color)
 
     # a faint ping sweeping outward from the bumper
     phase = (now % PING_PERIOD) / PING_PERIOD
     if phase < 0.85:
-      self._draw_ring(frame, phase / 0.85 * MAX_RANGE * 0.98, 4.0, rgba(WHITE, 0.14 * (1 - phase / 0.85) * alpha))
+      pts = [frame.project(d, y) for d, y in ring_points(phase / 0.85 * MAX_RANGE * 0.98)]
+      draw_polyline(pts, 4.0, rgba(WHITE, 0.14 * (1 - phase / 0.85) * alpha))
 
   def _draw_lanes(self, frame: ScopeFrame, alpha: float) -> None:
+    """Each lane line in one call per unbroken run, and our lane's shading as one triangle strip, instead of a call per segment."""
     if self._lane_y is None:
       return
-    xs, ys = [], []
-    for i in range(4):
-      x, y = frame.project_arrays(LANE_DISTANCES, self._lane_y[i])
-      xs.append(x)
-      ys.append(y)
+    visible = np.isfinite(self._lane_y) & (np.abs(np.nan_to_num(self._lane_y, nan=np.inf)) <= MAX_LATERAL)
+    xs, ys = frame.project_arrays(LANE_DISTANCES[None, :], np.nan_to_num(self._lane_y))
+    ys = np.broadcast_to(ys, xs.shape)
 
     # our lane, shaded
-    left, right = self._lane_y[1], self._lane_y[2]
+    both = visible[1] & visible[2]
     fill = rgba(CLASS_RGB[TrackClass.MOVING], 0.1 * alpha)
-    for j in range(LANE_SAMPLES - 1):
-      if not (np.isfinite(left[j:j + 2]).all() and np.isfinite(right[j:j + 2]).all()):
-        continue
-      if max(abs(left[j]), abs(right[j]), abs(left[j + 1]), abs(right[j + 1])) > MAX_LATERAL:
-        continue
-      a, b, c, d = (xs[1][j], ys[1][j]), (xs[2][j], ys[2][j]), (xs[2][j + 1], ys[2][j + 1]), (xs[1][j + 1], ys[1][j + 1])
-      draw_triangle(a, b, c, fill)
-      draw_triangle(a, c, d, fill)
+    for lo, hi in runs(both):
+      strip = np.empty((2 * (hi - lo), 2))
+      strip[0::2, 0], strip[0::2, 1] = xs[1, lo:hi], ys[1, lo:hi]
+      strip[1::2, 0], strip[1::2, 1] = xs[2, lo:hi], ys[2, lo:hi]
+      pts = strip.tolist()
+      rl.draw_triangle_strip(pts, len(pts), fill)
 
     for i in (0, 3, 1, 2):
       bright = i in (1, 2)
       color = rgba(WHITE, (0.85 if bright else 0.3) * self._lane_alpha[i] * alpha)
-      thickness = LANE_WIDTH_OURS if bright else LANE_WIDTH_OTHER
-      lat = self._lane_y[i]
-      for j in range(LANE_SAMPLES - 1):
-        if not (np.isfinite(lat[j]) and np.isfinite(lat[j + 1])) or max(abs(lat[j]), abs(lat[j + 1])) > MAX_LATERAL:
-          continue
-        rl.draw_line_ex(rl.Vector2(xs[i][j], ys[i][j]), rl.Vector2(xs[i][j + 1], ys[i][j + 1]), thickness, color)
+      for lo, hi in runs(visible[i]):
+        draw_polyline(np.column_stack((xs[i, lo:hi], ys[i, lo:hi])).tolist(), LANE_WIDTH_OURS if bright else LANE_WIDTH_OTHER, color)
+
+  def _draw_blindspots(self, frame: ScopeFrame, now: float, alpha: float) -> None:
+    """The car's blind spot monitor: the lane beside us lit from behind the car to a little ahead of the bumper. Most radars that
+    give the scope only the car ahead still have blind spot sensors, and this is where those cars are."""
+    pulse = 0.5 + 0.5 * math.sin(now * 2 * math.pi / 0.9)
+    rgb = ZONE_RGB[GapZone.CLOSE]
+    for side, level in zip((-1.0, 1.0), (f.x for f in self._blindspots), strict=True):
+      if level < 0.01:
+        continue
+      inner, outer = frame.cx + side * BLINDSPOT_LATERAL[0] * frame.px_per_m, frame.cx + side * BLINDSPOT_LATERAL[1] * frame.px_per_m
+      top = frame.origin_y - float(frame.range_frac(BLINDSPOT_AHEAD)) * frame.height
+      zone = rl.Rectangle(min(inner, outer), top, abs(outer - inner), frame.origin_y + EGO_H - top)
+      r = roundness(10, zone.width, zone.height)
+      rl.draw_rectangle_rounded(zone, r, 8, rgba(rgb, (0.3 + 0.25 * pulse) * level * alpha))
+      rl.draw_rectangle_rounded_lines_ex(zone, r, 8, 3, rgba(rgb, 0.9 * level * alpha))
 
   def _draw_tracks(self, frame: ScopeFrame, now: float, alpha: float) -> None:
     feed = self._feed

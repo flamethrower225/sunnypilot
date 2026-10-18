@@ -121,33 +121,42 @@ class DisengageMeter:
     self._dot = FirstOrderFilter(np.array(ZONE_RGB[GapZone.GOOD], dtype=float), 0.2, dt)
     self._labels: list[str] = []
     self._shown = False
+    self._model = None
+    self._target: tuple[np.ndarray, float, np.ndarray] | None = None
 
   def _reset(self) -> None:
     self._alpha.x = 0.0
     self._risk.initialized = False
     self._total.initialized = False
     self._shown = False
+    self._model = None
 
   def update(self) -> None:
     if not ui_state.disengage_horizon:
       self._reset()
       return
 
-    cumulative = np.zeros(0)
+    shown = False
     if model_fresh():
-      meta = ui_state.sm["modelV2"].meta
-      dp = meta.disengagePredictions
-      cumulative = combine_disengage(dp.brakeDisengageProbs, dp.gasDisengageProbs, dp.steerOverrideProbs)[:MAX_CELLS]
-      if cumulative.size:
-        hazard = slice_hazard(cumulative)
+      model = ui_state.sm["modelV2"]
+      if model is not self._model:  # the predictions only change with a new model frame
+        self._model = model
+        dp = model.meta.disengagePredictions
+        cumulative = combine_disengage(dp.brakeDisengageProbs, dp.gasDisengageProbs, dp.steerOverrideProbs)[:MAX_CELLS]
+        self._target = None
+        if cumulative.size:
+          self._target = (slice_hazard(cumulative), float(cumulative[-1]), np.array(confidence_color(model.confidence), dtype=float))
+          self._labels = horizon_labels(dp.t, cumulative.size)
+      if self._target is not None:
+        hazard, total, dot = self._target
         if self._risk.initialized and self._risk.x.shape != hazard.shape:
           self._risk.initialized = False
         self._risk.update(hazard)
-        self._total.update(float(cumulative[-1]))
-        self._labels = horizon_labels(dp.t, cumulative.size)
-        self._dot.update(np.array(confidence_color(ui_state.sm["modelV2"].confidence), dtype=float))
+        self._total.update(total)
+        self._dot.update(dot)
+        shown = True
 
-    self._shown = cumulative.size > 0
+    self._shown = shown
     self._alpha.update_alpha(FADE_IN_RC if self._shown else FADE_OUT_RC)
     self._alpha.update(1.0 if self._shown else 0.0)
 

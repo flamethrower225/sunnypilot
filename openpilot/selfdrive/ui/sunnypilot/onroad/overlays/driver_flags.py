@@ -57,6 +57,7 @@ class FlagSpec:
 FLAGS = (
   FlagSpec("sleep", tr_noop("DROWSY"), ZONE_RGB[GapZone.CRITICAL], SLEEP_THRESH),
   FlagSpec("phone", tr_noop("PHONE"), ZONE_RGB[GapZone.CLOSE], PHONE_THRESH),
+  FlagSpec("distracted", tr_noop("DISTRACTED"), ZONE_RGB[GapZone.CAUTION], 0.0),
 )
 
 
@@ -92,6 +93,15 @@ def flag_inputs(driver_data) -> dict[str, bool]:
     "phone": face and driver_data.phoneProb > PHONE_THRESH,
     "sleep": face and driver_data.sleepProb > SLEEP_THRESH,
   }
+
+
+def is_distracted(dm_state) -> bool:
+  """The monitoring policy itself calls the driver distracted by where they look (head pose or eyes), so the chip shows exactly when
+  the attention ring starts to drain for it. A phone has its own chip."""
+  if dm_state.activePolicy != log.DriverMonitoringState.MonitoringPolicy.vision:
+    return False
+  vision = dm_state.visionPolicyState
+  return bool(vision.isDistracted and (vision.distractedTypes.pose or vision.distractedTypes.eye))
 
 
 def awareness_percent(dm_state) -> int:
@@ -149,6 +159,7 @@ class DriverFlags:
       self._rhd = bool(dm_state.isRHD)
       driver_state = sm["driverStateV2"]
       raw = flag_inputs(driver_state.rightDriverData if self._rhd else driver_state.leftDriverData)
+      raw["distracted"] = is_distracted(dm_state) and not raw["phone"]
       self._awareness = awareness_percent(dm_state)
 
     now = rl.get_time()
@@ -205,6 +216,8 @@ class DriverFlags:
     rl.draw_circle_v(rl.Vector2(cx, cy), CHIP_ICON / 2, rgba(flag.rgb, alpha))
     if flag.key == "phone":
       self._draw_phone_glyph(cx, cy, alpha)
+    elif flag.key == "distracted":
+      self._draw_open_eye_glyph(cx, cy, alpha)
     else:
       self._draw_closed_eye_glyph(cx, cy, alpha)
     draw_text(self._font_bold, tr(flag.label), CHIP_TEXT_SIZE, x + 10 + CHIP_ICON + 10,
@@ -228,6 +241,14 @@ class DriverFlags:
       start = rl.Vector2(cx + 8.5 * g * math.cos(rad), cy - 5.5 * g + 8.5 * g * math.sin(rad))
       end = rl.Vector2(cx + 12.5 * g * math.cos(rad), cy - 5.5 * g + 12.5 * g * math.sin(rad))
       rl.draw_line_ex(start, end, 2.0 * g, color)
+
+  @staticmethod
+  def _draw_open_eye_glyph(cx: float, cy: float, alpha: float) -> None:
+    g = GLYPH_SCALE
+    color = rgba(INK, 0.92 * alpha)
+    draw_arc(rl.Vector2(cx, cy + 6 * g), 11 * g, 2.4 * g, 210, 330, color, round_caps=True)   # upper lid
+    draw_arc(rl.Vector2(cx, cy - 6 * g), 11 * g, 2.4 * g, 30, 150, color, round_caps=True)    # lower lid
+    rl.draw_circle_v(rl.Vector2(cx + 3 * g, cy), 3.6 * g, color)   # looking off to the side
 
   def _draw_attention_ring(self, center: rl.Vector2, alpha: float) -> None:
     """Attention as a ring around the driver monitoring icon, no text: it empties and turns red as an alert gets closer."""

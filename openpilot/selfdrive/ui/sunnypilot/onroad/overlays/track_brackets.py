@@ -13,12 +13,12 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, STROKE_MIN, TEXT_MIN, WHITE, ZONE_RGB, rgba, \
-  draw_text, draw_delta_arrow, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, STROKE_MIN, TEXT_MIN, WHITE, ZONE_RGB, clamp, \
+  rgba, draw_text, draw_delta_arrow, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, LeadGapBadgeStyle, format_distance, speed_value
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import BOARD_TTC_MAX, CLASS_RGB, RadarFeed, RadarTrack, TrackClass, Lane, \
-  display_zone, in_threat_corridor, rank_threats, NO_TRACK
+  display_zone, in_threat_corridor, rank_threats, shared_radar_feed, NO_TRACK
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -112,7 +112,7 @@ class TrackBrackets:
       self._tagged = set()
       self._brackets.clear()
       return
-    self._feed.update(ui_state.sm, ui_state.started_frame)
+    self._feed = shared_radar_feed(ui_state.sm, ui_state.started_frame, self._dt)
     # the lead lock badge already brackets the lead; with any other style the lead gets a bracket like everything else,
     # which on a radar that only reports the car ahead is the only one there is
     skip = self._feed.lead_ids[0] if ui_state.lead_gap_badge == LeadGapBadgeStyle.LOCK else NO_TRACK
@@ -173,8 +173,8 @@ class TrackBrackets:
   @staticmethod
   def _draw_corners(left: float, top: float, right: float, bottom: float, rgb, alpha: float, thick: bool) -> None:
     w, h = right - left, bottom - top
-    arm_x, arm_y = float(np.clip(w * 0.3, 8.0, MAX_ARM_X)), float(np.clip(h * 0.36, 8.0, MAX_ARM_Y))
-    t = float(np.clip(w * (0.06 if thick else 0.045), *(LINE_THREAT if thick else LINE_OTHER)))
+    arm_x, arm_y = clamp(w * 0.3, 8.0, MAX_ARM_X), clamp(h * 0.36, 8.0, MAX_ARM_Y)
+    t = clamp(w * (0.06 if thick else 0.045), *(LINE_THREAT if thick else LINE_OTHER))
     corners = (
       ((left, top), (1, 1)),
       ((right, top), (-1, 1)),
@@ -203,7 +203,7 @@ class TrackBrackets:
     pad_x, pad_y, gap = 16.0, 4.0, 8.0
     content_w = (arrow + gap if arrow else 0.0) + num_sz.x + gap + unit_sz.x
     tag_w, tag_h = content_w + 2 * pad_x, num_sz.y + 2 * pad_y
-    x = float(np.clip(cx - tag_w / 2, rect.x + MARGIN, rect.x + rect.width - MARGIN - tag_w))
+    x = clamp(cx - tag_w / 2, rect.x + MARGIN, rect.x + rect.width - MARGIN - tag_w)
     y = min(box_bottom + 10.0, rect.y + rect.height - MARGIN - tag_h)
 
     tag = rl.Rectangle(x, y, tag_w, tag_h)

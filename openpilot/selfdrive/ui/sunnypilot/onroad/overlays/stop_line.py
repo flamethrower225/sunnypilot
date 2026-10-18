@@ -13,7 +13,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE, rgba, draw_text, draw_triangle, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import StopPhase, get_detection_feed
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import STOP_RGB, format_distance, update_feed
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import STOP_RGB, WARN_RGB, format_distance, update_feed
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -30,6 +30,13 @@ LABEL_SIZE = 44     # px, the distance is the part you read, so it is as large a
 EDGE_WIDTH = 5.0    # px
 STEM_WIDTH = 4.0    # px
 
+BRAKE_DECEL = 2.0         # m/s^2, comfortable braking: the brake point is where it has to start to stop at the line
+BRAKE_MARGIN = 2.0        # m short of the line, same as Pace Border aims for
+ALREADY_BRAKING = 0.8     # m/s^2, once the car slows this hard the marker has done its job
+BRAKE_DASHES = 4
+BRAKE_RGB = WARN_RGB
+BRAKE_LABEL_SIZE = 36  # px, the text floor
+
 
 def quad(projector: RoadProjector, x: float, y_c: float, heading: float, half_len: float, half_w: float):
   """Four screen corners of a road-aligned rectangle centered at (x, y_c), or None if any is off view."""
@@ -41,6 +48,12 @@ def quad(projector: RoadProjector, x: float, y_c: float, heading: float, half_le
       return None
     corners.append(p)
   return corners
+
+
+def brake_point(stop_x: float, v_ego: float, decel: float = BRAKE_DECEL) -> float:
+  """Distance (m) to where braking at decel has to start to stop BRAKE_MARGIN short of the line. At or below zero it's too late
+  to brake gently."""
+  return stop_x - BRAKE_MARGIN - v_ego ** 2 / (2 * decel)
 
 
 def fill_quad(corners, color: rl.Color) -> None:
@@ -55,6 +68,8 @@ class StopLine:
     self._font = gui_app.font(FontWeight.BOLD)
     self._alpha = FirstOrderFilter(0.0, 0.12, 1 / gui_app.target_fps)
     self._x: float | None = None
+    self._brake_alpha = FirstOrderFilter(0.0, 0.2, 1 / gui_app.target_fps)
+    self._brake_x = 0.0
 
   def update(self) -> None:
     if not ui_state.stop_detection:
@@ -67,6 +82,14 @@ class StopLine:
     if visible:
       self._x = stop.stop_x  # already smoothed by the detector, same number as the card
     self._alpha.update(1.0 if visible else 0.0)
+
+    # where gentle braking has to start, until the car is braking or it's too late for gentle
+    cs = ui_state.sm['carState']
+    brake_x = brake_point(stop.stop_x, cs.vEgo) if visible and stop.stop_x is not None else 0.0
+    show = visible and not stop.car_ahead and brake_x > MIN_X and cs.aEgo > -ALREADY_BRAKING
+    if show:
+      self._brake_x = brake_x
+    self._brake_alpha.update(1.0 if show else 0.0)
 
   def render(self, rect: rl.Rectangle, projector: RoadProjector) -> None:
     alpha = self._alpha.x
@@ -89,6 +112,9 @@ class StopLine:
     bar = quad(projector, x_draw, y_c, heading, THICKNESS / 2, HALF_WIDTH)
     if glow is None or bar is None:
       return
+
+    if self._brake_alpha.x > 0.01 and lock >= 1.0:
+      self._draw_brake_point(projector, self._brake_alpha.x * alpha)
 
     pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 2 * math.pi / 1.4)
     fill_quad(glow, rgba(STOP_RGB, (0.18 + 0.12 * pulse) * alpha))
@@ -114,3 +140,18 @@ class StopLine:
     base = projector.to_screen(x_draw, y_c)
     if base is not None and base[1] > py + h:
       rl.draw_line_ex(rl.Vector2(base[0], base[1]), rl.Vector2(anchor[0], py + h), STEM_WIDTH, rgba(STOP_RGB, 0.8 * alpha))
+
+  def _draw_brake_point(self, projector: RoadProjector, alpha: float) -> None:
+    """A dashed bar across the lane where gentle braking has to begin, and BRAKE beside it."""
+    x = float(self._brake_x)
+    y_c = float(projector.path_y(x))
+    heading = math.atan((float(projector.path_y(x + 1.0)) - float(projector.path_y(max(x - 1.0, 0.1)))) / 2.0)
+    dash_half = HALF_WIDTH / (2 * BRAKE_DASHES - 1)
+    for k in range(BRAKE_DASHES):
+      offset = -HALF_WIDTH + dash_half * (4 * k + 1)
+      dash = quad(projector, x - offset * math.sin(heading), y_c + offset * math.cos(heading), heading, 0.3, dash_half)
+      if dash is not None:
+        fill_quad(dash, rgba(BRAKE_RGB, 0.9 * alpha))
+    edge = projector.to_screen(x - HALF_WIDTH * 1.15 * math.sin(heading), y_c + HALF_WIDTH * 1.15 * math.cos(heading))
+    if edge is not None:
+      draw_text(self._font, tr("BRAKE"), BRAKE_LABEL_SIZE, edge[0] + 8, edge[1] - BRAKE_LABEL_SIZE, rgba(BRAKE_RGB, alpha), spacing=1)

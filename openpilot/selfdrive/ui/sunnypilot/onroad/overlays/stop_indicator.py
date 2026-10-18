@@ -14,7 +14,8 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, TEXT_MIN, WHITE, ZONE_RGB, rgba, draw_text, \
   draw_text_centered, draw_triangle, draw_value_with_unit, measure_value_with_unit, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import FT_PER_M, GapZone
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import DetectionEvent, EventKind, StopPhase, get_detection_feed
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import NOTIFICATION_KINDS, DetectionEvent, EventKind, StopPhase, \
+  get_detection_feed
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import scope_rect
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -225,6 +226,12 @@ EVENT_STYLE = {
   EventKind.LEAD_DEPART: (tr_noop("DEPARTING"), GO_RGB),
   EventKind.CURVE: (tr_noop("CURVE"), WARN_RGB),
   EventKind.HARD_BRAKE: (tr_noop("HARD BRAKE"), STOP_RGB),
+  EventKind.STOPPED_TRAFFIC: (tr_noop("STOPPED CAR"), STOP_RGB),
+  EventKind.SHARP_CURVE: (tr_noop("SHARP CURVE"), ZONE_RGB[GapZone.CLOSE]),
+  EventKind.SLOW_LEAD: (tr_noop("SLOW LEAD"), ZONE_RGB[GapZone.OPEN]),
+  EventKind.OVER_LIMIT: (tr_noop("OVER LIMIT"), WARN_RGB),
+  EventKind.SPEED_LIMIT: (tr_noop("SPEED LIMIT"), WHITE),
+  EventKind.BREAK: (tr_noop("BREAK"), GO_RGB),
 }
 
 
@@ -238,6 +245,8 @@ def event_detail(event: DetectionEvent, is_metric: bool) -> str:
     parts.append(tr("car") if event.car_ahead else tr("no car"))
   if event.kind in (EventKind.LEAD, EventKind.CUT_IN) and event.radar is not None:
     parts.append(tr("radar") if event.radar else tr("vision"))
+  if event.note:
+    parts.insert(0, event.note)
   return " • ".join(parts)
 
 
@@ -293,10 +302,13 @@ class DetectionLogPanel:
     y = self._top.update(target)
     if stopped and recent:
       self._draw_list(x, y, w, recent[:LOG_ROWS_STOPPED], now, alpha)
-    elif not stopped and log and now - log[0].mono_time < LOG_SHOW_MOVING:
-      self._draw_latest(x, y, w, log[0], now, alpha)
     else:
-      self._draw_idle(x, y, w, log[0] if log else None, now, alpha)
+      # while driving, a notification is already on its own card, so the log shows what else came up
+      moving = [e for e in log if not (ui_state.drive_notifications and e.kind in NOTIFICATION_KINDS)] if not stopped else log
+      if not stopped and moving and now - moving[0].mono_time < LOG_SHOW_MOVING:
+        self._draw_latest(x, y, w, moving[0], now, alpha)
+      else:
+        self._draw_idle(x, y, w, moving[0] if moving else None, now, alpha)
 
   def _draw_idle(self, x: float, y: float, w: float, event: DetectionEvent | None, now: float, alpha: float) -> None:
     if event is not None:

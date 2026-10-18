@@ -18,7 +18,8 @@ MAX_ENTRIES = 20
 WINDOW_S = 6.0           # look back this far when the alert appears
 CURVE_LAT_ACC = 1.6      # m/s^2 predicted lateral acceleration that counts as a curve ahead (the curve preview's threshold)
 OVERLAY_FLAGS = ("curve_hologram", "stop_detection", "detection_log", "radar_scope", "radar_track_brackets", "threat_board",
-                 "follow_ghost", "lead_braking_wake", "disengage_horizon", "driver_flags", "hard_brake_flash", "lead_gap_history")
+                 "follow_ghost", "lead_braking_wake", "disengage_horizon", "driver_flags", "hard_brake_flash", "lead_gap_history",
+                 "pace_border", "drive_notifications", "lead_gap_badge")  # every HUD overlay toggle (the badge is on when its style isn't Off)
 
 
 class CommIssueWatch:
