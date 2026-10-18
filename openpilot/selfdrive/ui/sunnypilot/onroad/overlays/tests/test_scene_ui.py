@@ -12,13 +12,15 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import pyray as rl
 
 from openpilot.cereal import messaging
 from openpilot.common.constants import CV
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays import detection, drive_notifications as dn, light_view, pace_border as pb
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays import detection, drive_notifications as dn, light_view, pace_border as pb, \
+  stop_indicator
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import StopPhase
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import LightView, SignView, current_light
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import LightView, SignView, current_light, read_light
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import CAMERA_ID_BASE, RadarFeed, camera_tracks
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.tests.test_ar_overlays import next_sm_time, overlay_env
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.tests.test_drive_notifications import HIGHWAY, engine_with, run
@@ -51,6 +53,7 @@ class TestCameraTracks(OpenpilotTestCase):
 
   def test_they_join_the_shared_feed(self):
     class SM:
+      frame = 1
       valid = {"radarTracks": False, "radarState": True, "sceneDetectionSP": True}
       alive = {"radarTracks": False, "radarState": True, "sceneDetectionSP": True}
       recv_frame = {"radarTracks": -1, "radarState": 1, "carState": 1, "sceneDetectionSP": 1, "modelV2": -1}
@@ -83,10 +86,33 @@ class TestCurrentLight(OpenpilotTestCase):
       send_scene(scene_msg("red"))
       view = current_light()
       assert view is not None and view.state == RED and abs(view.distance - 60.0) < 1e-3
-      send_scene(scene_msg("green", confidence=0.3))
-      assert current_light() is None
+      assert read_light(min_confidence=0.95) is None
     with overlay_env(scene_detection=False, started=True, started_frame=0):
+      assert current_light() is None   # off is off at once, no hold
+
+  def test_a_dip_in_confidence_is_ridden_through(self):
+    with overlay_env(scene_detection=True, started=True, started_frame=0):
+      feed(v_ego=10.0)
+      send_scene(scene_msg("red", distance=60.0))
+      assert current_light().state == RED
+      send_scene(scene_msg("red", confidence=0.4))      # under the bar to show, over the bar to keep
+      assert current_light().state == RED
+      send_scene(scene_msg("green", confidence=0.2))    # scened unsure: the red is held a moment
+      held = current_light()
+      assert held.state == RED
+      for _ in range(int(light_view.HOLD * 20) + 2):
+        feed(v_ego=10.0)
       assert current_light() is None
+
+  def test_distances_count_down_between_messages(self):
+    with overlay_env(scene_detection=True, started=True, started_frame=0):
+      feed(v_ego=20.0)
+      send_scene(scene_extras(sign=40.0, people=[(30.0, 1.0, "pedestrian")], state="red"))
+      for _ in range(5):   # a quarter second of UI frames at 20 m/s, no new message
+        feed(v_ego=20.0)
+      assert abs(read_light().distance - 55.0) < 0.6
+      assert abs(light_view.current_stop_sign().distance - 35.0) < 0.6
+      assert abs(light_view.camera_people()[0].dRel - 27.5) < 0.4   # vRel -10 m/s
 
   def test_chip_follows_the_light(self):
     with overlay_env(scene_detection=True, started=True, started_frame=0):
@@ -308,19 +334,55 @@ class TestPaceBorderSigns(OpenpilotTestCase):
 
 class TestChip(OpenpilotTestCase):
   def test_counts_the_wait_at_a_red(self):
+    clock = [100.0]
+    tl = "openpilot.selfdrive.ui.sunnypilot.onroad.overlays.traffic_light"
+    with overlay_env(scene_detection=True, started=True, started_frame=0), \
+         mock.patch(f"{tl}.time.monotonic", side_effect=lambda: clock[0]), \
+         mock.patch(f"{tl}.current_light", return_value=LightView(RED, 0.9, 15.0, 30.0)):
+      chip = TrafficLightChip()
+      feed(v_ego=0.0)
+      chip.update()
+      clock[0] = 101.0
+      for _ in range(10):
+        chip.update()
+      assert chip.waited == pytest.approx(1.0) and chip._wait_mix.x < 0.01   # not yet: maybe just rolling up to it
+      clock[0] = 142.5
+      for _ in range(20):
+        chip.update()
+      assert chip.waited == pytest.approx(42.5) and wait_text(42.5) == "0:42" and chip._wait_mix.x > 0.9
+      feed(v_ego=10.0)
+      chip.update()
+      assert chip.waited is None
+
+  def test_a_change_of_state_cross_fades_and_rings(self):
+    tl = "openpilot.selfdrive.ui.sunnypilot.onroad.overlays.traffic_light"
     with overlay_env(scene_detection=True, started=True, started_frame=0):
       chip = TrafficLightChip()
       feed(v_ego=0.0)
-      with mock.patch("openpilot.selfdrive.ui.sunnypilot.onroad.overlays.traffic_light.current_light",
-                      return_value=LightView(RED, 0.9, 15.0, 30.0)), \
-           mock.patch("openpilot.selfdrive.ui.sunnypilot.onroad.overlays.traffic_light.time.monotonic", side_effect=[100.0, 142.5]):
+      with mock.patch(f"{tl}.current_light", return_value=LightView(RED, 0.9, 30.0, 3.0)):
+        for _ in range(20):
+          chip.update()
+      assert chip._prev_face is None and chip._swap.x == 1.0
+      with mock.patch(f"{tl}.current_light", return_value=LightView(GREEN, 0.9, 30.0, 0.1)):
         chip.update()
-        assert chip.waited == pytest.approx(42.5) and wait_text(42.5) == "0:42"
-      feed(v_ego=10.0)
-      with mock.patch("openpilot.selfdrive.ui.sunnypilot.onroad.overlays.traffic_light.current_light",
-                      return_value=LightView(RED, 0.9, 15.0, 30.0)):
+        assert chip._prev_face.state == RED and chip._swap.x < 0.5 and chip._face.state == GREEN
+        for _ in range(20):
+          chip.update()
+      assert chip._swap.x > 0.95
+
+  def test_the_distance_glides_and_snaps_to_a_new_light(self):
+    tl = "openpilot.selfdrive.ui.sunnypilot.onroad.overlays.traffic_light"
+    with overlay_env(scene_detection=True, started=True, started_frame=0):
+      chip = TrafficLightChip()
+      feed(v_ego=0.0)
+      with mock.patch(f"{tl}.current_light", return_value=LightView(RED, 0.9, 50.0, 3.0)):
         chip.update()
-      assert chip.waited is None
+      with mock.patch(f"{tl}.current_light", return_value=LightView(RED, 0.9, 46.0, 3.0)):
+        chip.update()
+      assert 46.0 < chip._distance.x < 50.0   # a pass's correction is eased in
+      with mock.patch(f"{tl}.current_light", return_value=LightView(RED, 0.9, 110.0, 3.0)):
+        chip.update()
+      assert chip._distance.x == 110.0       # the next light down the road is a new number
 
   def test_shows_a_stop_sign_when_there_is_no_light(self):
     with overlay_env(scene_detection=True, started=True, started_frame=0):
@@ -343,3 +405,76 @@ class TestCameraFlagsOnTracks(OpenpilotTestCase):
     tracks = camera_tracks([SimpleNamespace(trackId=2, dRel=12.0, yRel=-3.4, vRel=0.0, lastSeen=0.1, lane=1, braking=False, merging=True)],
                            radar, None, 20.0)
     assert tracks[0].merging and tracks[0].camera
+
+
+# ---- smoothness ----
+
+class TestSmoothness(OpenpilotTestCase):
+  def test_camera_cars_glide_between_messages(self):
+    cars = [SimpleNamespace(trackId=1, dRel=30.0, yRel=3.5, vRel=-4.0, lateralSpeed=-1.0, lastSeen=0.1, lane=-1, braking=False, merging=False)]
+    (t,) = camera_tracks(cars, [], None, 20.0, elapsed=0.5)
+    assert t.d_rel == pytest.approx(28.0) and t.y_rel == pytest.approx(3.0)
+
+  def test_scope_things_fade_in_and_out(self):
+    from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import update_fades
+    from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import make_track
+    car = make_track(1, 30.0, 0.0, 0.0, 20.0, braking=True)
+    fades: dict = {}
+    fades = update_fades(fades, {1: car}, 0.05, lambda t: (t.braking, t.merging))
+    assert 0.0 < fades[1].alpha.x < 0.5 and 0.0 < fades[1].braking.x < 0.5   # fading in, not popping
+    for _ in range(20):
+      fades = update_fades(fades, {1: car}, 0.05, lambda t: (t.braking, t.merging))
+    assert fades[1].alpha.x > 0.95 and fades[1].braking.x > 0.9
+    fades = update_fades(fades, {}, 0.05)
+    assert 1 in fades and fades[1].item is car   # lost: it fades where it was last seen
+    for _ in range(30):
+      fades = update_fades(fades, {}, 0.05)
+    assert fades == {}
+
+  def test_flash_level_ramps(self):
+    levels = [light_view.flash_level(t / 100) for t in range(100)]
+    assert max(levels) == 1.0 and min(levels) == 0.0
+    assert any(0.1 < v < 0.9 for v in levels)   # soft edges
+    assert sum(v > 0.5 for v in levels) == pytest.approx(50, abs=8)
+
+  def test_the_chip_fades_under_the_stop_card(self):
+    tl = "openpilot.selfdrive.ui.sunnypilot.onroad.overlays.traffic_light"
+    with overlay_env(scene_detection=True, started=True, started_frame=0), \
+         mock.patch(f"{tl}.current_light", return_value=LightView(RED, 0.9, 30.0, 3.0)):
+      chip = TrafficLightChip()
+      feed(v_ego=10.0)
+      for _ in range(20):
+        chip.update()
+      rect = rl.Rectangle(0, 0, 2160, 1080)
+      drawn = []
+      with mock.patch(f"{tl}.rl.draw_rectangle_rounded", side_effect=lambda r, rnd, seg, color: drawn.append(color.a)), \
+           mock.patch(f"{tl}.draw_signal_head"), mock.patch(f"{tl}.draw_text"), \
+           mock.patch(f"{tl}.measure_text_cached", return_value=rl.Vector2(100, 40)), \
+           mock.patch(f"{tl}.rl.draw_rectangle_rounded_lines_ex"), \
+           mock.patch.object(stop_indicator, "_card_bottom", 400.0), mock.patch.object(stop_indicator, "_card_alpha", 0.5):
+        chip.render(rect)
+        assert drawn and drawn[0] < 0.62 * 255 * 0.6   # half faded under a half shown card
+        assert stop_indicator.card_bottom() == 400.0   # and the card, taller, keeps the column
+
+
+class TestCardSwap(OpenpilotTestCase):
+  def test_a_new_card_fades_the_old_one_out_first(self):
+    first = dn.Notification(dn.NotifyKind.SLOW_LEAD, "SLOW LEAD", "Pass on the left", "", (255, 255, 255), dn.Icon.LEFT, None, 30.0)
+    second = dn.Notification(dn.NotifyKind.PEDESTRIAN, "PEDESTRIAN", "Pedestrian ahead", "", (255, 0, 0), dn.Icon.PERSON, None, 10.0)
+    with overlay_env(drive_notifications=True, started=True, started_frame=0):
+      overlay = dn.DriveNotifications()
+      current = SimpleNamespace(note=first)
+      overlay.engine = SimpleNamespace(update=lambda snap: None, current=current, reset=lambda: None)
+      with mock.patch.object(dn, "read_snapshot"), mock.patch.object(dn, "log_notification"):
+        for _ in range(20):
+          overlay.update()
+        assert overlay._note is first and overlay._content.x > 0.95
+        current.note = second
+        overlay.update()
+        assert overlay._note is first and overlay._pending is second   # the old words fade out first
+        for _ in range(10):
+          overlay.update()
+        assert overlay._note is second and overlay._pending is None
+        for _ in range(20):
+          overlay.update()
+        assert overlay._content.x > 0.95 and overlay._alpha.x > 0.95   # the card itself never went away

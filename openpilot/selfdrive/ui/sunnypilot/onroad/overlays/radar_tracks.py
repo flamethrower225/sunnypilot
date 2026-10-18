@@ -27,6 +27,7 @@ BOARD_TTC_MAX = 20.0           # s, closing slower than this isn't worth a row o
 NO_TRACK = -1
 CAMERA_ID_BASE = 100000        # camera track ids are offset so they never collide with radar track ids
 CAMERA_MAX_AGE = 1.0           # s since scened last saw a car before it's left out
+CAMERA_PREDICT_MAX = 1.0       # s a camera car is carried forward between scened messages at most
 CAMERA_DUPLICATE = (4.0, 1.6)  # m along and across: a camera car this close to a radar one is the same car
 VISION_LEAD_IDS = (-2, -3)     # leadOne and leadTwo when no radar track is behind them, so each still has an id of its own
 RADAR_TO_CAMERA = 1.52         # m, the model's distances are from the camera, radar distances from the front bumper
@@ -244,6 +245,7 @@ class RadarFeed:
   tracks at all, where the leads radard picked (from the model when there's no radar) are all there is."""
 
   def __init__(self, dt: float):
+    self._dt = dt
     self._smoother = TrackSmoother(dt)
     self.available = False       # radar tracks or radard's leads are arriving
     self.tracks: list[RadarTrack] = []
@@ -277,7 +279,9 @@ class RadarFeed:
     raw = parse_tracks(sm['radarTracks'].points, self.v_ego, self._lateral_fallback(sm, started_frame, radar_state)) if tracks_ok else []
     if service_fresh(sm, 'sceneDetectionSP', started_frame):
       vehicles = sm['sceneDetectionSP'].vehicles
-      raw = with_camera_flags(raw, vehicles) + camera_tracks(vehicles, raw, radar_state, self.v_ego)
+      # scened speaks a few times a second; between its messages its cars move on at their speed, so they glide instead of stepping
+      elapsed = min(max(sm.frame - sm.recv_frame['sceneDetectionSP'], 0) * self._dt, CAMERA_PREDICT_MAX)
+      raw = with_camera_flags(raw, vehicles) + camera_tracks(vehicles, raw, radar_state, self.v_ego, elapsed)
       self.available = True
     self.tracks = self._smoother.update(raw, self.v_ego)
     self.lead_one, self.lead_two = match_leads(self.tracks, self.lead_ids)
@@ -312,9 +316,9 @@ class RadarFeed:
     return lateral
 
 
-def camera_tracks(vehicles, radar: list[RadarTrack], radar_state, v_ego: float) -> list[RadarTrack]:
+def camera_tracks(vehicles, radar: list[RadarTrack], radar_state, v_ego: float, elapsed: float = 0.0) -> list[RadarTrack]:
   """scened's cars as tracks, leaving out any the radar (or radard's lead) already has, so a car shows once. On a radar that only
-  reports the car ahead these are all the other cars there are."""
+  reports the car ahead these are all the other cars there are. elapsed (s since the message) carries each forward at its speed."""
   known = [(t.d_rel, t.y_rel) for t in radar]
   if radar_state is not None:
     known += [(lead.dRel, lead.yRel) for lead in (radar_state.leadOne, radar_state.leadTwo) if lead.present]
@@ -324,7 +328,11 @@ def camera_tracks(vehicles, radar: list[RadarTrack], radar_state, v_ego: float) 
       continue
     if any(same_car(v, d, y) for d, y in known):
       continue
-    out.append(make_track(CAMERA_ID_BASE + int(v.trackId), float(v.dRel), float(v.yRel), float(v.vRel), v_ego, camera=True,
+    d_rel = float(v.dRel) + float(v.vRel) * elapsed
+    y_rel = float(v.yRel) + float(getattr(v, "lateralSpeed", 0.0)) * elapsed
+    if d_rel <= 0.0:
+      continue
+    out.append(make_track(CAMERA_ID_BASE + int(v.trackId), d_rel, y_rel, float(v.vRel), v_ego, camera=True,
                           braking=bool(getattr(v, "braking", False)), merging=bool(getattr(v, "merging", False))))
   return out
 

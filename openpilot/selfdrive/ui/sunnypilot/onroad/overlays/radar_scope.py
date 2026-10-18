@@ -58,6 +58,39 @@ PERSON_RGB = ZONE_RGB[GapZone.CAUTION]
 KIND_CYCLIST = 5                   # SceneDetectionSP.VehicleKind
 
 
+FADE_RC = 0.15                     # s, a dot or figure fading in when found and out when lost
+FLAG_RC = 0.2                      # s, brake lamps and the merging chevron coming and going
+
+
+class Fade:
+  """One thing on the scope by id: its last position and how visible it and its flags are, so it fades instead of popping."""
+
+  def __init__(self, item, dt: float):
+    self.item = item
+    self.alpha = FirstOrderFilter(0.0, FADE_RC, dt)
+    self.braking = FirstOrderFilter(0.0, FLAG_RC, dt)
+    self.merging = FirstOrderFilter(0.0, FLAG_RC, dt)
+
+
+def update_fades(fades: dict, items: dict, dt: float, flags=lambda item: (False, False)) -> dict:
+  """Brings each id's fade toward shown (present in items) or gone, and drops the ones that have faded out."""
+  out = {}
+  for key, item in items.items():
+    f = fades.get(key) or Fade(item, dt)
+    f.item = item
+    f.alpha.update(1.0)
+    braking, merging = flags(item)
+    f.braking.update(1.0 if braking else 0.0)
+    f.merging.update(1.0 if merging else 0.0)
+    out[key] = f
+  for key, f in fades.items():
+    if key not in out and f.alpha.update(0.0) > 0.02:
+      f.braking.update(0.0)
+      f.merging.update(0.0)
+      out[key] = f
+  return out
+
+
 @dataclass(frozen=True)
 class ScopeFrame:
   """Maps car-frame meters to screen pixels. Range is square-root compressed so the near field, where it matters,
@@ -139,7 +172,8 @@ class RadarScope:
     self._blindspots = (FirstOrderFilter(0.0, 0.1, dt), FirstOrderFilter(0.0, 0.1, dt))  # left, right
     self._lanes_model = None
     self._rings: list[tuple[rl.Vector2, rl.Vector2]] = []
-    self._people: list = []
+    self._track_fades: dict[int, Fade] = {}
+    self._people_fades: dict[int, Fade] = {}
 
   def update(self) -> None:
     if not ui_state.radar_scope:
@@ -152,7 +186,9 @@ class RadarScope:
     self._blindspots[0].update(1.0 if fresh and cs.leftBlindspot else 0.0)
     self._blindspots[1].update(1.0 if fresh and cs.rightBlindspot else 0.0)
     self._alpha.update(1.0 if self._feed.available else 0.0)
-    self._people = camera_people(sm)
+    self._track_fades = update_fades(self._track_fades, {t.track_id: t for t in self._feed.tracks}, self._dt,
+                                     lambda t: (t.braking, t.merging))
+    self._people_fades = update_fades(self._people_fades, {p.trackId: p for p in camera_people(sm)}, self._dt)
     if self._alpha.x > 0.01:
       self._update_lanes(sm)
 
@@ -263,14 +299,15 @@ class RadarScope:
   def _draw_tracks(self, frame: ScopeFrame, now: float, alpha: float) -> None:
     feed = self._feed
     lead_one, lead_two = feed.lead_one, feed.lead_two
-    tracks = [t for t in feed.tracks if frame.visible(t.d_rel, t.y_right)]
+    fades = [f for f in self._track_fades.values() if frame.visible(f.item.d_rel, f.item.y_right)]
     # stationary clutter first so moving traffic and threats land on top
-    tracks.sort(key=lambda t: (t.cls != TrackClass.STATIONARY, t.ttc < math.inf))
-    for t in tracks:
-      self._draw_dot(frame, t, now, alpha)
-    for p in self._people:
+    fades.sort(key=lambda f: (f.item.cls != TrackClass.STATIONARY, f.item.ttc < math.inf))
+    for f in fades:
+      self._draw_dot(frame, f.item, now, alpha * f.alpha.x, f.braking.x, f.merging.x)
+    for f in self._people_fades.values():
+      p = f.item
       if frame.visible(p.dRel, -p.yRel):
-        draw_person(*frame.project(p.dRel, -p.yRel), p.kind == KIND_CYCLIST, alpha)
+        draw_person(*frame.project(p.dRel, -p.yRel), p.kind == KIND_CYCLIST, alpha * f.alpha.x)
 
     for lead, ring in ((lead_two, "dashed"), (lead_one, "solid")):
       if lead is not None and frame.visible(lead.d_rel, lead.y_right):
@@ -281,7 +318,7 @@ class RadarScope:
         self._draw_lead_ring(frame, lead, ring, now, alpha * 0.8)
 
   @staticmethod
-  def _draw_dot(frame: ScopeFrame, t: RadarTrack, now: float, alpha: float) -> None:
+  def _draw_dot(frame: ScopeFrame, t: RadarTrack, now: float, alpha: float, braking: float = 0.0, merging: float = 0.0) -> None:
     x, y = frame.project(t.d_rel, t.y_right)
     zone = display_zone(t)
     rgb = ZONE_RGB[zone] if zone is not None else CLASS_RGB[t.cls]
@@ -307,27 +344,26 @@ class RadarScope:
       # a car the cameras found: a rounded square, so it reads apart from the radar's dots
       box = rl.Rectangle(x - radius, y - radius * 1.25, 2 * radius, 2.5 * radius)
       rl.draw_rectangle_rounded(box, 0.45, 8, rgba(rgb, a))
-      if t.braking:   # its outline turns brake red, so it reads even under a lead ring
-        rl.draw_rectangle_rounded_lines_ex(box, 0.45, 8, 4.0, rgba(BRAKE_RGB, alpha))
-      else:
-        rl.draw_rectangle_rounded_lines_ex(box, 0.45, 8, 2.5, rgba(WHITE, 0.55 * alpha))
-      if t.braking:
-        draw_brake_lamps(x, y + radius * 1.25, radius, now, alpha)
+      # its outline turns brake red, so it reads even under a lead ring
+      outline = tuple(w + (b - w) * braking for w, b in zip(WHITE, BRAKE_RGB, strict=True))
+      rl.draw_rectangle_rounded_lines_ex(box, 0.45, 8, 2.5 + 1.5 * braking, rgba(outline, (0.55 + 0.45 * braking) * alpha))
+      if braking > 0.01:
+        draw_brake_lamps(x, y + radius * 1.25, radius, alpha * braking)
     elif t.cls == TrackClass.ONCOMING and zone is None:
       rl.draw_ring(rl.Vector2(x, y), radius - 5.0, radius, 0, 360, 24, rgba(rgb, a))
     else:
       rl.draw_circle_v(rl.Vector2(x, y), radius, rgba(rgb, a))
       if not stationary:
         rl.draw_circle_v(rl.Vector2(x - radius * 0.25, y - radius * 0.25), radius * 0.35, rgba(WHITE, 0.35 * alpha))
-      if t.braking:
-        rl.draw_ring(rl.Vector2(x, y), radius + 1.0, radius + 4.0, 0, 360, 24, rgba(BRAKE_RGB, alpha))
-        draw_brake_lamps(x, y + radius * 0.9, radius, now, alpha)
-    if t.merging:
-      # a chevron on the side toward our lane, pointing in
+      if braking > 0.01:
+        rl.draw_ring(rl.Vector2(x, y), radius + 1.0, radius + 4.0, 0, 360, 24, rgba(BRAKE_RGB, alpha * braking))
+        draw_brake_lamps(x, y + radius * 0.9, radius, alpha * braking)
+    if merging > 0.01:
+      # a chevron on the side toward our lane, pointing in and nudging that way
       side = -1.0 if x > frame.cx else 1.0
-      tip = x + side * (radius + 16)
-      rgb_m = ZONE_RGB[GapZone.CLOSE]
-      draw_triangle((tip, y), (tip - side * 12, y - 10), (tip - side * 12, y + 10), rgba(rgb_m, alpha))
+      nudge = 4.0 * (0.5 - 0.5 * math.cos(now * 2 * math.pi / 0.8))
+      tip = x + side * (radius + 16 + nudge)
+      draw_triangle((tip, y), (tip - side * 12, y - 10), (tip - side * 12, y + 10), rgba(ZONE_RGB[GapZone.CLOSE], alpha * merging))
 
   @staticmethod
   def _draw_lead_ring(frame: ScopeFrame, lead: RadarTrack, style: str, now: float, alpha: float) -> None:
@@ -355,12 +391,11 @@ class RadarScope:
     draw_triangle((cx - 8, top - 3), (cx + 8, top - 3), (cx, top - 15), rgba(WHITE, 0.9 * alpha))
 
 
-def draw_brake_lamps(x: float, y: float, radius: float, now: float, alpha: float) -> None:
-  """Two red lamps across the back of a car (the side toward us), glowing."""
-  glow = 0.75 + 0.25 * math.sin(now * 2 * math.pi / 0.5)
+def draw_brake_lamps(x: float, y: float, radius: float, alpha: float) -> None:
+  """Two red lamps across the back of a car (the side toward us), glowing steadily, as brake lights do."""
   for dx in (-radius * 0.65, radius * 0.65):
     c = rl.Vector2(x + dx, y)
-    rl.draw_circle_v(c, 8.0, rgba(BRAKE_RGB, 0.3 * glow * alpha))
+    rl.draw_circle_v(c, 8.0, rgba(BRAKE_RGB, 0.28 * alpha))
     rl.draw_circle_v(c, 4.5, rgba(BRAKE_RGB, alpha))
 
 

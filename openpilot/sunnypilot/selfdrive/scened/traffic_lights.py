@@ -296,8 +296,15 @@ class TrafficLightFilter:
     """Monotonic s a relevant head was last in view."""
     return self._last_seen
 
-  def update(self, now: float, observations: list[LightObservation], turn: int = 0) -> TrafficLightReading:
+  @property
+  def updated_at(self) -> float | None:
+    """Monotonic s of the last update, which the reading's distance is as of."""
+    return self._last_t
+
+  def update(self, now: float, observations: list[LightObservation], turn: int = 0, v_ego: float = 0.0) -> TrafficLightReading:
     if self._last_t is not None:
+      if math.isfinite(self._distance):
+        self._distance = max(self._distance - v_ego * max(now - self._last_t, 0.0), 0.0)   # it came closer since the last look
       decay = math.exp(-max(now - self._last_t, 0.0) / EVIDENCE_TAU)
       for c in self.evidence:
         self.evidence[c] *= decay
@@ -422,6 +429,10 @@ class StopSignFilter:
     self._last_t: float | None = None
     self._last_seen = -math.inf
     self._distance = math.nan
+
+  @property
+  def updated_at(self) -> float | None:
+    return self._last_t
 
   def update(self, now: float, observations: list[SignObservation], v_ego: float = 0.0) -> StopSignReading:
     if self._last_t is not None:

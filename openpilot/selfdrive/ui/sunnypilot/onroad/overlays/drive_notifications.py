@@ -46,7 +46,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.curve_hologram import cur
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import DetectionEvent, EventKind, get_detection_feed
 from openpilot.selfdrive.ui.sunnypilot.model_plan import model_plan
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import camera_people, current_light, current_stop_sign, draw_signal_head, \
-  draw_stop_sign
+  draw_stop_sign, flash_level
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import RADAR_TO_CAMERA, service_fresh
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode as SpeedLimitMode
@@ -788,6 +788,9 @@ TEXT_SIZE = 48
 DETAIL_SIZE = TEXT_MIN
 LINE_GAP = 4.0
 MAX_TEXT_LINES = 2
+SWAP_RC = 0.07            # s, one card's contents fading out for the next
+HEIGHT_RC = 0.1           # s, the card growing or shrinking to fit
+COLOR_RC = 0.12
 ACCENT_W = 8.0
 SLIDE = 40.0              # px the card slides in from
 
@@ -804,8 +807,13 @@ class DriveNotifications:
     self._font_bold = gui_app.font(FontWeight.BOLD)
     self._font_semi = gui_app.font(FontWeight.SEMI_BOLD)
     self.engine = NotificationEngine()
-    self._alpha = FirstOrderFilter(0.0, 0.15, 1 / gui_app.target_fps)
-    self._note: Notification | None = None   # kept while the card fades out
+    dt = 1 / gui_app.target_fps
+    self._alpha = FirstOrderFilter(0.0, 0.15, dt)
+    self._content = FirstOrderFilter(1.0, SWAP_RC, dt)   # the card's contents, faded out and back in when another card takes over
+    self._height = FirstOrderFilter(0.0, HEIGHT_RC, dt, initialized=False)
+    self._rgb = FirstOrderFilter(np.zeros(3), COLOR_RC, dt, initialized=False)
+    self._note: Notification | None = None      # on the card: kept while the card fades out
+    self._pending: Notification | None = None   # waiting for the card's contents to fade out
 
   def update(self) -> None:
     if not ui_state.drive_notifications or not ui_state.started:
@@ -817,9 +825,19 @@ class DriveNotifications:
     new = self.engine.update(read_snapshot(ui_state.sm, now))
     if new is not None:
       log_notification(new, now)
-    if self.engine.current is not None:
-      self._note = self.engine.current.note
-    self._alpha.update(1.0 if self.engine.current is not None else 0.0)
+    cur = self.engine.current.note if self.engine.current is not None else None
+    if cur is not None:
+      if self._note is None or self._alpha.x < 0.05 or cur.kind == self._note.kind:
+        self._note, self._pending = cur, None   # the same card with fresh numbers, or a card coming up from nothing
+        if self._alpha.x < 0.05:
+          self._height.initialized = self._rgb.initialized = False
+      else:
+        self._pending = cur
+    if self._pending is not None and self._content.update(0.0) < 0.05:
+      self._note, self._pending = self._pending, None
+    elif self._pending is None:
+      self._content.update(1.0)
+    self._alpha.update(1.0 if cur is not None else 0.0)
 
   def render(self, rect: rl.Rectangle) -> None:
     alpha = self._alpha.x
@@ -842,32 +860,41 @@ class DriveNotifications:
     while detail and measure_text_cached(self._font_semi, detail, DETAIL_SIZE).x > room:
       detail = detail.rsplit(" ", 1)[0] if " " in detail else ""
     text_h = len(lines) * text_size + (len(lines) - 1) * LINE_GAP
-    h = PAD + TITLE_SIZE + LINE_GAP + text_h + (LINE_GAP + DETAIL_SIZE if detail else 0) + PAD
+    target_h = PAD + TITLE_SIZE + LINE_GAP + text_h + (LINE_GAP + DETAIL_SIZE if detail else 0) + PAD
+    # the card grows and shrinks, and changes color, smoothly when what it says changes
+    if not self._height.initialized:
+      self._height.x, self._height.initialized = target_h, True
+      self._rgb.x, self._rgb.initialized = np.array(note.rgb, dtype=float), True
+    h = self._height.update(target_h)
+    card_rgb = tuple(self._rgb.update(np.array(note.rgb, dtype=float)))
+    content = self._content.x * alpha
 
     card = rl.Rectangle(x, y, w, h)
     r = roundness(22, w, h)
     rl.draw_rectangle_rounded(card, r, 12, rgba(BLACK, 0.72 * alpha))
-    rl.draw_rectangle_rounded(card, r, 12, rgba(note.rgb, 0.1 * alpha))
-    rl.draw_rectangle_rounded_lines_ex(card, r, 12, 3, rgba(note.rgb, 0.8 * alpha))
-    rl.draw_rectangle_rounded(rl.Rectangle(x + 6, y + 14, ACCENT_W, h - 28), 1.0, 6, rgba(note.rgb, alpha))
+    rl.draw_rectangle_rounded(card, r, 12, rgba(card_rgb, 0.1 * alpha))
+    rl.draw_rectangle_rounded_lines_ex(card, r, 12, 3, rgba(card_rgb, 0.8 * alpha))
+    rl.draw_rectangle_rounded(rl.Rectangle(x + 6, y + 14, ACCENT_W, h - 28), 1.0, 6, rgba(card_rgb, alpha))
 
     # time left on the card, a thin bar along the bottom (sticky cards stay full while their reason holds)
     cur = self.engine.current
     if cur is not None and cur.note is note and not cur.rule.sticky:
       left = max(0.0, 1.0 - (time.monotonic() - cur.since) / cur.rule.ttl)
       bar_w = (w - 2 * PAD - ACCENT_W) * left
-      rl.draw_rectangle_rounded(rl.Rectangle(x + ACCENT_W + PAD, y + h - 9, bar_w, 4), 1.0, 4, rgba(note.rgb, 0.6 * alpha))
+      rl.draw_rectangle_rounded(rl.Rectangle(x + ACCENT_W + PAD, y + h - 9, bar_w, 4), 1.0, 4, rgba(note.rgb, 0.6 * content))
 
+    if content < 0.01:
+      return
     icon = rl.Vector2(x + ACCENT_W + PAD + ICON_R, y + h / 2)
-    self._draw_icon(icon, note, alpha)
+    self._draw_icon(icon, note, content)
     ty = y + PAD
-    draw_text(self._font_bold, note.title, TITLE_SIZE, text_x, ty, rgba(note.rgb, alpha), spacing=1.5)
+    draw_text(self._font_bold, note.title, TITLE_SIZE, text_x, ty, rgba(note.rgb, content), spacing=1.5)
     ty += TITLE_SIZE + LINE_GAP
     for line in lines:
-      draw_text(self._font_bold, line, text_size, text_x, ty, rgba(WHITE, alpha))
+      draw_text(self._font_bold, line, text_size, text_x, ty, rgba(WHITE, content))
       ty += text_size + LINE_GAP
-    if detail:
-      draw_text(self._font_semi, detail, DETAIL_SIZE, text_x, ty, rgba(WHITE, 0.75 * alpha))
+    if detail and ty + DETAIL_SIZE <= y + h:   # it waits for the card to have grown to fit it
+      draw_text(self._font_semi, detail, DETAIL_SIZE, text_x, ty, rgba(WHITE, 0.75 * content))
 
   def _draw_icon(self, c: rl.Vector2, note: Notification, alpha: float) -> None:
     rl.draw_circle_v(c, ICON_R, rgba(note.rgb, alpha))
@@ -899,7 +926,10 @@ class DriveNotifications:
       rl.draw_line_ex(rl.Vector2(cx + 3, cy + 11), rl.Vector2(cx + 8, cy + 23), 5, ink)
     elif icon in (Icon.SIGNAL_RED, Icon.SIGNAL_YELLOW, Icon.SIGNAL_GREEN):
       rl.draw_circle_v(c, ICON_R, rgba(BLACK, alpha))   # a signal head reads best on black
-      draw_signal_head(cx, cy, 0.72, {Icon.SIGNAL_RED: 1, Icon.SIGNAL_YELLOW: 2, Icon.SIGNAL_GREEN: 3}[icon], alpha)
+      state = {Icon.SIGNAL_RED: LIGHT_RED, Icon.SIGNAL_YELLOW: LIGHT_YELLOW, Icon.SIGNAL_GREEN: LIGHT_GREEN}[icon]
+      light = current_light()   # drawn as the light is now: its arrow, and blinking when it flashes
+      arrow, lit = (light.arrow, flash_level(time.monotonic()) if light.flashing else 1.0) if light and light.state == state else (0, 1.0)
+      draw_signal_head(cx, cy, 0.72, state, alpha, arrow, lit)
     elif icon == Icon.WAIT:
       rl.draw_rectangle_rounded(rl.Rectangle(cx - 13, cy - 15, 9, 30), 0.5, 4, ink)
       rl.draw_rectangle_rounded(rl.Rectangle(cx + 4, cy - 15, 9, 30), 0.5, 4, ink)

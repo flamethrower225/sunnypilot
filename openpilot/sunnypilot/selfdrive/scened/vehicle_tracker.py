@@ -222,6 +222,11 @@ class VehicleTracker:
     self._t: float | None = None
     self.gate_x, self.gate_y, self.coast = gate_x, gate_y, coast
 
+  @property
+  def updated_at(self) -> float | None:
+    """Monotonic s the tracks' positions are as of."""
+    return self._t
+
   def predict(self, now: float, yaw_rate: float) -> None:
     dt = 0.0 if self._t is None else max(now - self._t, 0.0)
     self._t = now

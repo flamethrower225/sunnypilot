@@ -18,7 +18,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import NOTIFICA
   get_detection_feed
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import LIGHT_REASON, LIGHT_RGB, LightState, current_light, current_stop_sign, \
-  draw_signal_head, draw_stop_sign
+  draw_signal_head, draw_stop_sign, flash_level
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_scope import scope_rect
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -80,10 +80,15 @@ def format_distance(meters: float, is_metric: bool) -> tuple[str, str]:
 
 # bottom edge of the card this frame, so the log can sit right under it
 _card_bottom: float | None = None
+_card_alpha = 0.0   # how visible the stop card is this frame, so the light chip can cross-fade with it instead of vanishing
 
 
 def card_bottom() -> float | None:
   return _card_bottom
+
+
+def card_alpha() -> float:
+  return _card_alpha
 
 
 def set_card_bottom(y: float | None) -> None:
@@ -151,11 +156,12 @@ class StopCard:
     return lines
 
   def render(self, rect: rl.Rectangle) -> None:
-    global _card_bottom
-    _card_bottom = None
+    global _card_bottom, _card_alpha
+    _card_bottom, _card_alpha = None, 0.0
     alpha = self._alpha.x
     if not ui_state.stop_detection or alpha < 0.01:
       return
+    _card_alpha = alpha
 
     now = time.monotonic()
     stop = get_detection_feed().stop
@@ -225,7 +231,7 @@ class StopCard:
     elif self._phase == StopPhase.CLEARED:
       draw_text_centered(self._font_bold, "✓", 40, c.x, c.y, ink)
     elif (light := current_light()) is not None and not get_detection_feed().stop.car_ahead:
-      draw_signal_head(c.x, c.y, 0.72, light.state, alpha, light.arrow)
+      draw_signal_head(c.x, c.y, 0.72, light.state, alpha, light.arrow, flash_level(time.monotonic()) if light.flashing else 1.0)
     elif current_stop_sign() is not None and not get_detection_feed().stop.car_ahead:
       draw_stop_sign(c.x, c.y, ICON_R, self._font_bold, alpha)
     else:
