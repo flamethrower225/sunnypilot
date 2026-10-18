@@ -1,3 +1,5 @@
+from unittest import mock
+
 from openpilot.cereal import messaging
 from openpilot.cereal.messaging import FrequencyTracker
 from openpilot.sunnypilot.selfdrive.selfdrived.comm_issue_log import MAX_ENTRIES, PARAM, CommIssueLog
@@ -67,3 +69,33 @@ def test_nothing_failing_records_nothing_and_errors_never_escape():
     def __getitem__(self, name):
       raise RuntimeError("boom")
   log.record(Broken(), {'invalid': ['carState'], 'not_alive': [], 'not_freq_ok': []})  # must not raise into selfdrived
+
+
+def test_services_selfdrived_ignores_are_left_out():
+  # what a drive on 2026-10-18 recorded: driver monitoring late, plus the maneuver tools' streams that never run on the road
+  sm = FakeSM()
+  ignored = ['alertDebug', 'lateralManeuverPlan']
+  sm.ignore_alive = sm.ignore_valid = ignored
+  sm._check_avg_freq = lambda s: s not in ignored
+  params = FakeParams()
+  log = CommIssueLog(params)
+  log.record(sm, {'invalid': ['driverMonitoringState', 'alertDebug', 'lateralManeuverPlan'],
+                  'not_alive': ['alertDebug', 'lateralManeuverPlan'],
+                  'not_freq_ok': ['driverMonitoringState', 'alertDebug', 'lateralManeuverPlan']})
+  (entry,) = params.data[PARAM]
+  assert entry["kind"].startswith("commIssueAvgFreq")   # not "a process stopped sending": nothing that counts stopped
+  assert entry["not_alive"] == [] and entry["invalid"] == ['driverMonitoringState']
+  assert [r["service"] for r in entry["late"]] == ['driverMonitoringState']
+
+  log.record(sm, {'invalid': ignored, 'not_alive': ignored, 'not_freq_ok': ignored})
+  assert len(params.data[PARAM]) == 1   # only ignored services failing: nothing to record
+
+
+def test_a_change_within_the_same_second_is_one_entry():
+  params = FakeParams()
+  log = CommIssueLog(params)
+  with mock.patch("openpilot.sunnypilot.selfdrive.selfdrived.comm_issue_log.time.strftime", return_value="2026-10-18 20:55:51"):
+    log.record(FakeSM(), {'invalid': [], 'not_alive': [], 'not_freq_ok': ['modelV2']})
+    log.record(FakeSM(), {'invalid': ['modelV2'], 'not_alive': [], 'not_freq_ok': ['modelV2']})
+  entries = params.data[PARAM]
+  assert len(entries) == 1 and entries[0]["invalid"] == ['modelV2']
