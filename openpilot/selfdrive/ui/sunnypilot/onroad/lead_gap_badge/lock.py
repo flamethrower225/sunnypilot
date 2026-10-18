@@ -10,7 +10,7 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, TEXT_MIN, WHITE, rgba, zone_label, \
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, TEXT_MIN, WHITE, clamp, rgba, zone_label, \
   draw_text, draw_value_with_unit, measure_value_with_unit, draw_delta_arrow, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, LeadGapReading, primary_value, speed_value, \
   speed_delta
@@ -54,7 +54,7 @@ class LeadLock:
     pad_w, pad_h = w * BOX_PADDING, h * BOX_PADDING
     left, right, top, bottom = left - pad_w, right + pad_w, top - pad_h, bottom + pad_h * 0.5
     cx = (left + right) / 2
-    w = float(np.clip(right - left, MIN_BOX_W, rect.width * MAX_BOX_W_FRACTION))
+    w = clamp(right - left, MIN_BOX_W, rect.width * MAX_BOX_W_FRACTION)
     h = max(bottom - top, MIN_BOX_H)
     return np.array([cx - w / 2, bottom - h, cx + w / 2, bottom])
 
@@ -121,7 +121,7 @@ class LeadLock:
     tag_w = gap_w + spd_w
     tag_h = gap_sz.y * 0.92 + label_sz.y + 1.1 * K
 
-    x = float(np.clip(cx - tag_w / 2, rect.x + MARGIN, rect.x + rect.width - MARGIN - tag_w))
+    x = clamp(cx - tag_w / 2, rect.x + MARGIN, rect.x + rect.width - MARGIN - tag_w)
     y = min(box_bottom + STEM, rect.y + rect.height - max(MARGIN, bottom_reserve) - tag_h)
 
     if y > box_bottom:

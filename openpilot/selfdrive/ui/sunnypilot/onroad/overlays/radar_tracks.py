@@ -17,6 +17,7 @@ import numpy as np
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, CRITICAL_LIMITS, CLOSE_LIMITS, CAUTION_TTC, \
   MIN_CLOSING_SPEED, SNAP_DISTANCE
+from openpilot.selfdrive.ui.sunnypilot.model_plan import model_plan
 
 LANE_HALF_WIDTH = 1.8          # m, |yRel| below this is in our lane
 ADJACENT_LANE_LIMIT = 5.4      # m, the neighboring lanes end here
@@ -300,11 +301,30 @@ class RadarFeed:
     return lateral
 
 
+_shared: RadarFeed | None = None
+_shared_frame = -1
+
+
+def shared_radar_feed(sm, started_frame: int, dt: float) -> RadarFeed:
+  """The one RadarFeed the scope, the board and the brackets all read, advanced once per SubMaster frame. Each used to keep its own,
+  which parsed and smoothed every track three times a frame."""
+  global _shared, _shared_frame
+  if _shared is None:
+    _shared = RadarFeed(dt)
+  if sm.frame != _shared_frame:
+    _shared_frame = sm.frame
+    _shared.update(sm, started_frame)
+  return _shared
+
+
 def planned_path(sm, started_frame: int) -> tuple[np.ndarray, np.ndarray]:
   """x and y (m, right positive) of the model's planned path, empty when there is no plan this drive."""
   if sm.recv_frame.get('modelV2', -1) < started_frame:
     return np.empty(0), np.empty(0)
-  position = sm['modelV2'].position
+  plan = model_plan(sm, started_frame)
+  if plan.size:
+    return plan.x, plan.y
+  position = sm['modelV2'].position  # a plan without speeds still has a path
   xs, ys = list(position.x), list(position.y)  # capnp lists don't slice
   n = min(len(xs), len(ys))
   return np.asarray(xs[:n], dtype=float), np.asarray(ys[:n], dtype=float)

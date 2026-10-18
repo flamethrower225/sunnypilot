@@ -7,7 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 import numpy as np
 import pyray as rl
 
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, TEXT_MIN, WHITE, ZONE_RGB, rgba, gauge_scale, zone_label, \
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, INK, TEXT_MIN, WHITE, ZONE_RGB, clamp, rgba, gauge_scale, zone_label, \
   draw_text, draw_value_with_unit, draw_delta_arrow, draw_car_glyph, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import LeadGapReading, primary_value, speed_value, speed_delta
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -87,7 +87,7 @@ class FollowStrip:
     draw_car_glyph(track_x, car_y, car_w, rgba(WHITE, alpha))
 
     if scale.target is not None:
-      notch_x = rail_x + rail_w * float(np.clip(scale.target / scale.max_value, 0.0, 1.0))
+      notch_x = rail_x + rail_w * clamp(scale.target / scale.max_value, 0.0, 1.0)
       notch = rl.Rectangle(notch_x - 0.25 * k, bar_y - 0.9 * k, 0.5 * k, bar_h + 1.8 * k)
       rl.draw_rectangle_rounded(notch, 0.6, 4, rgba(WHITE, alpha))
 

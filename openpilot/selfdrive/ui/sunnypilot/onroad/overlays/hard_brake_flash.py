@@ -12,6 +12,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE, ZONE_RGB, rgba, draw_text, draw_text_centered, \
   draw_triangle, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.edge_glow import draw_edge_glow
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -24,7 +25,6 @@ PULSE_HZ = 2.0
 FADE_IN_RC = 0.06
 FADE_OUT_RC = 0.35
 
-EDGE_RADIUS = 36.0      # px, corner radius of the glow along the content rect
 EDGE_STEP = 4.0         # px between bands
 EDGE_LAYERS = 20        # so the glow reaches about 80 px in from the edge
 EDGE_ALPHA = 0.3       # opacity of the outermost band at full strength
@@ -53,13 +53,21 @@ class HoldLatch:
 
 
 def pulse(t: float, hz: float = PULSE_HZ) -> float:
-  """0 to 1, a sine at hz that starts at its trough."""
+  """0 to 1, a sine at hz that starts at its lowest point."""
   return 0.5 - 0.5 * math.cos(2 * math.pi * hz * t)
 
 
 def model_fresh() -> bool:
   sm = ui_state.sm
   return sm.recv_frame["modelV2"] >= ui_state.started_frame and sm.valid["modelV2"] and sm.alive["modelV2"]
+
+
+_level = 0.0
+
+
+def warning_level() -> float:
+  """How strongly the hard brake warning shows, 0 to 1. Pace Border leaves the screen edge to it while it does."""
+  return _level
 
 
 class HardBrakeFlash:
@@ -76,15 +84,16 @@ class HardBrakeFlash:
     self._alpha = FirstOrderFilter(0.0, FADE_OUT_RC, 1 / gui_app.target_fps)
 
   def update(self) -> None:
+    global _level
     if not ui_state.hard_brake_flash:
       self._latch.reset()
-      self._alpha.x = 0.0
+      self._alpha.x = _level = 0.0
       return
 
     predicted = model_fresh() and bool(ui_state.sm["modelV2"].meta.hardBrakePredicted)
     held = self._latch.update(predicted, rl.get_time())
     self._alpha.update_alpha(FADE_IN_RC if held else FADE_OUT_RC)
-    self._alpha.update(1.0 if held else 0.0)
+    _level = self._alpha.update(1.0 if held else 0.0)
 
   def render(self, rect: rl.Rectangle) -> None:
     if not ui_state.hard_brake_flash:
@@ -94,23 +103,8 @@ class HardBrakeFlash:
       return
 
     beat = pulse(rl.get_time())
-    self._draw_edge_glow(rect, alpha * (0.5 + 0.5 * beat))
+    draw_edge_glow(rect, RED, EDGE_STEP * EDGE_LAYERS, EDGE_ALPHA * alpha * (0.5 + 0.5 * beat), EDGE_LAYERS)
     self._draw_banner(rect, alpha, beat)
-
-  @staticmethod
-  def _draw_edge_glow(rect: rl.Rectangle, strength: float) -> None:
-    """Inner glow as nested rounded outlines, each inset one step deeper and fainter than the last. Every band is two steps thick, so
-    neighbours overlap and leave no seams, and the corner radius shrinks with the inset so the bands stay parallel."""
-    thickness = 2 * EDGE_STEP
-    for i in range(EDGE_LAYERS):
-      inset = i * EDGE_STEP
-      layer = rl.Rectangle(rect.x + inset, rect.y + inset, rect.width - 2 * inset, rect.height - 2 * inset)
-      radius = EDGE_RADIUS - inset
-      if radius < thickness:  # raylib's thick outline breaks when the thickness passes the corner radius, and this close it's square anyway
-        radius = 0.0
-      falloff = (1.0 - i / EDGE_LAYERS) ** 2
-      rl.draw_rectangle_rounded_lines_ex(layer, roundness(radius, layer.width, layer.height) if radius else 0.0, 12, thickness,
-                                         rgba(RED, EDGE_ALPHA * falloff * strength))
 
   def _draw_banner(self, rect: rl.Rectangle, alpha: float, beat: float) -> None:
     text = tr("HARD BRAKE PREDICTED")

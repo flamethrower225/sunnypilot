@@ -5,6 +5,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import pyray as rl
@@ -12,13 +13,14 @@ import pyray as rl
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import INK, STROKE_MIN, TEXT_MIN, WHITE, ZONE_RGB, draw_triangle, \
-  draw_value_with_unit, measure_value_with_unit, rgba
+  clamp, draw_value_with_unit, measure_value_with_unit, rgba
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
+from openpilot.selfdrive.ui.sunnypilot.model_plan import ModelPlan, model_plan
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector, draw_ribbons
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.multilang import tr
-from openpilot.system.ui.lib.shader_polygon import Gradient, draw_polygon
+from openpilot.system.ui.lib.shader_polygon import Gradient
 
 # Curve hologram: when the model predicts a real bend ahead, two glowing rails run along the planned path, colored by
 # the predicted lateral acceleration, and a gate stands over the road at the tightest point with an advisory speed.
@@ -30,6 +32,10 @@ APEX_MIN_X = 10.0         # m, a gate closer than this is already behind the cam
 APEX_MAX_X = 120.0        # m, and one farther than this is too small to read
 APEX_NEAR_PEAK = 0.97     # fraction of the peak that counts as the top of the bend (a flat bend has no single maximum)
 SPEED_STEP = 5            # advisory speeds are rounded to this
+TOO_FAST_SHOW = 2.7       # m/s (6 mph) over the advisory speed before the label flashes red
+TOO_FAST_HIDE = 1.3       # m/s, and it stops below this
+TOO_FAST_PERIOD = 0.7     # s
+TOO_FAST_RGB = ZONE_RGB[GapZone.CRITICAL]
 
 RAIL_OFFSET = 1.0         # m either side of the planned path
 RAIL_HALF_WIDTH = 0.08    # m
@@ -68,8 +74,14 @@ def lateral_accels(yaw_rates, velocities) -> np.ndarray:
   return np.abs(np.asarray(yaw_rates[:n], dtype=float) * np.asarray(velocities[:n], dtype=float))
 
 
+def lat_acc_colors(lat_accs) -> np.ndarray:
+  """Colors (N x 3) for many lateral accelerations at once."""
+  lat = np.asarray(lat_accs, dtype=float)
+  return np.stack([np.interp(lat, LAT_ACC_BREAKPOINTS, LAT_ACC_COLORS[:, c]) for c in range(3)], axis=-1)
+
+
 def lat_acc_color(lat_acc: float) -> tuple[float, float, float]:
-  r, g, b = (float(np.interp(lat_acc, LAT_ACC_BREAKPOINTS, LAT_ACC_COLORS[:, c])) for c in range(3))
+  r, g, b = (float(c) for c in lat_acc_colors(lat_acc))
   return r, g, b
 
 
@@ -143,6 +155,41 @@ def display_speed(v: float, is_metric: bool, step: int = SPEED_STEP) -> int | No
   return max(step, int(math.floor(value / step + 0.5)) * step)
 
 
+@dataclass(frozen=True)
+class CurveAhead:
+  x: float        # m to the tightest point of the bend
+  speed: float    # m/s the bend calls for (advisory_speed)
+  right: bool     # bends to the right
+
+
+CURVE_LEAD_IN = 10.0     # m, be at the bend's speed this far before its tightest point
+CURVE_AHEAD_RANGE = (APEX_MIN_X, 200.0)  # m, wider than the gate's: an advisory wants to know about a bend sooner
+_curve_plan: ModelPlan | None = None
+_curve: CurveAhead | None = None
+
+
+def curve_decel_needed(v_ego: float, curve_speed: float, curve_x: float) -> float:
+  """m/s^2 of braking needed to be at the bend's speed CURVE_LEAD_IN before its tightest point."""
+  if v_ego <= curve_speed:
+    return 0.0
+  return (v_ego ** 2 - curve_speed ** 2) / (2 * max(curve_x - CURVE_LEAD_IN, 1.0))
+
+
+def curve_ahead(sm, started_frame: int) -> CurveAhead | None:
+  """The tightest point of the bend ahead and the speed it calls for, worked out once per model frame for everything that asks (the
+  drive notifications and Pace Border), whether or not the curve preview is on."""
+  global _curve_plan, _curve
+  plan = model_plan(sm, started_frame)
+  if plan is not _curve_plan:
+    _curve_plan, _curve = plan, None
+    idx = find_apex(plan.x, plan.lat_acc, *CURVE_AHEAD_RANGE) if plan.size else None
+    if idx is not None:
+      vision = sm['longitudinalPlanSP'].smartCruiseControl.vision
+      speed = advisory_speed(vision.active, vision.vTarget, float(plan.yaw_rate[idx]), float(plan.v[idx]))
+      _curve = CurveAhead(float(plan.x[idx]), speed, curve_direction(plan.x, plan.y, idx) > 0)
+  return _curve
+
+
 # ---- drawing helpers ----
 
 def _fill_convex(points: list[tuple[float, float]], color: rl.Color) -> None:
@@ -178,7 +225,11 @@ class CurveHologram:
     self._apex_lat = 0.0
     self._direction = 1
     self._speed: int | None = None
+    self._advisory = math.inf    # m/s
+    self._too_fast = False
+    self._apex_target = 0.0
     self._is_metric = False
+    self._plan: ModelPlan | None = None
 
   def _reset(self) -> None:
     self._rail_alpha.x = 0.0
@@ -186,6 +237,7 @@ class CurveHologram:
     self._apex_x.initialized = False
     self._on = False
     self._has_gate = False
+    self._plan = None
 
   def update(self) -> None:
     if not ui_state.curve_hologram:
@@ -193,22 +245,19 @@ class CurveHologram:
       return
 
     sm = ui_state.sm
-    if sm.recv_frame['modelV2'] < ui_state.started_frame:
+    plan = model_plan(sm, ui_state.started_frame)
+    if plan.size == 0:
       self._on = False
       self._has_gate = False
-    else:
-      model = sm['modelV2']
-      xs = np.asarray(model.position.x, dtype=float)
-      yaw = np.asarray(model.orientationRate.z, dtype=float)
-      vel = np.asarray(model.velocity.x, dtype=float)
-      lat = lateral_accels(yaw, vel)
-      n = min(len(lat), len(xs))
-      peak = float(lat[:n].max()) if n else 0.0
+    elif plan is not self._plan:  # the bend only changes with a new model frame
+      self._plan = plan
+      xs, lat = plan.x, plan.lat_acc
+      peak = float(lat.max())
       self._on = rails_active(peak, self._on)
-      idx = find_apex(xs[:n], lat[:n]) if self._on else None
+      idx = find_apex(xs, lat) if self._on else None
 
       if self._on:
-        self._xs, self._lat = xs[:n], lat[:n]
+        self._xs, self._lat = xs, lat
         self._severity = rail_severity(self._lat)
       if idx is None:
         self._has_gate = False
@@ -216,12 +265,17 @@ class CurveHologram:
         if not self._has_gate:
           self._apex_x.initialized = False
         self._has_gate = True
-        self._apex_x.update(float(xs[idx]))
+        self._apex_target = float(xs[idx])
         self._apex_lat = float(lat[idx])
-        self._direction = curve_direction(xs[:n], np.asarray(model.position.y, dtype=float), idx)
+        self._direction = curve_direction(xs, plan.y, idx)
         vision = sm['longitudinalPlanSP'].smartCruiseControl.vision
         self._is_metric = ui_state.is_metric
-        self._speed = display_speed(advisory_speed(vision.active, vision.vTarget, float(yaw[idx]), float(vel[idx])), self._is_metric)
+        self._advisory = advisory_speed(vision.active, vision.vTarget, float(plan.yaw_rate[idx]), float(plan.v[idx]))
+        self._speed = display_speed(self._advisory, self._is_metric)
+    v_ego = sm['carState'].vEgo
+    self._too_fast = self._has_gate and v_ego > self._advisory + (TOO_FAST_HIDE if self._too_fast else TOO_FAST_SHOW)
+    if self._has_gate:
+      self._apex_x.update(self._apex_target)
 
     self._rail_alpha.update(1.0 if self._on else 0.0)
     self._gate_alpha.update(1.0 if self._has_gate and self._speed is not None else 0.0)
@@ -233,29 +287,29 @@ class CurveHologram:
     self._draw_rails(rect, projector, self._rail_alpha.x)
     if self._gate_alpha.x >= 0.01:
       # a gate close by is huge on screen, so it eases in over the first stretch instead of filling the view
-      near = 0.35 + 0.65 * float(np.clip((self._apex_x.x - APEX_MIN_X) / 15.0, 0.0, 1.0))
+      near = 0.35 + 0.65 * clamp((self._apex_x.x - APEX_MIN_X) / 15.0, 0.0, 1.0)
       self._draw_gate(rect, projector, self._gate_alpha.x * self._rail_alpha.x * near)
 
   # ---- rails ----
 
   def _gradient_stops(self, rect: rl.Rectangle, projector: RoadProjector, x0: float, x1: float) -> list[tuple[float, tuple, float]]:
     """(screen-space stop, rgb, alpha fraction) along the path. Spaced evenly in 1/x, which is roughly even on screen."""
+    xs = 1.0 / np.linspace(1.0 / max(x0, STOP_X_NEAR), 1.0 / x1, GRADIENT_STOPS)
+    screen, ok = projector.to_screen_many(xs, projector.path_y(xs))
+    ts = 1.0 - (screen[:, 1] - rect.y) / rect.height  # same convention as the model renderer: 0 at the bottom, 1 at the top
+    colors = lat_acc_colors(np.interp(xs, self._xs, self._severity))
+    alphas = np.interp(xs, RAIL_ALPHA_X, RAIL_ALPHA)
     stops: list[tuple[float, tuple, float]] = []
-    for x in 1.0 / np.linspace(1.0 / max(x0, STOP_X_NEAR), 1.0 / x1, GRADIENT_STOPS):
-      p = projector.to_screen(float(x), float(projector.path_y(x)), 0.0)
-      if p is None:
-        continue
-      t = 1.0 - (p[1] - rect.y) / rect.height  # same convention as the model renderer: 0 at the bottom, 1 at the top
+    for i in np.flatnonzero(ok):
+      t = float(ts[i])
       if stops and t <= stops[-1][0]:
         continue
-      severity = float(np.interp(x, self._xs, self._severity))
-      stops.append((t, lat_acc_color(severity), float(np.interp(x, RAIL_ALPHA_X, RAIL_ALPHA))))
+      stops.append((t, tuple(colors[i]), float(alphas[i])))
     return stops
 
   @staticmethod
   def _make_gradient(stops, alpha: float) -> Gradient:
-    colors = [rl.Color(int(rgb[0]), int(rgb[1]), int(rgb[2]), int(min(a * alpha, 1.0) * 255)) for _, rgb, a in stops]  # rgba() is slow in a loop
-    return Gradient(start=(0.0, 1.0), end=(0.0, 0.0), colors=colors, stops=[t for t, _, _ in stops])
+    return Gradient(start=(0.0, 1.0), end=(0.0, 0.0), colors=[rgba(rgb, a * alpha) for _, rgb, a in stops], stops=[t for t, _, _ in stops])
 
   def _draw_rails(self, rect: rl.Rectangle, projector: RoadProjector, alpha: float) -> None:
     x0, x1 = RAIL_X_NEAR, min(projector.path_length, RAIL_X_FAR)
@@ -270,11 +324,10 @@ class CurveHologram:
 
     xs = x0 * (x1 / x0) ** np.linspace(0.0, 1.0, RAIL_SAMPLES)  # denser near the car, where the road is big on screen
     ys = projector.path_y(xs)
-    for half_width, gradient in passes:
-      for side in (-1.0, 1.0):
-        poly = projector.ribbon(xs, ys + side * RAIL_OFFSET, half_width)
-        if poly.shape[0] > 2:
-          draw_polygon(rect, poly, gradient=gradient)
+    rails = [ys - RAIL_OFFSET, ys + RAIL_OFFSET]
+    polygons = projector.ribbons(xs, rails * len(passes), [hw for hw, _ in passes for _ in rails])
+    for i, (_, gradient) in enumerate(passes):
+      draw_ribbons(rect, polygons[2 * i:2 * i + 2], gradient)
 
     self._draw_beads(projector, x0, min(x1, float(self._apex_x.x)) if self._has_gate else x1, alpha)
 
@@ -284,30 +337,28 @@ class CurveHologram:
     if x1 - x0 < 8.0:
       return
     phase = (rl.get_time() / BEAD_PERIOD) % 1.0
-    for k in range(BEADS_PER_RAIL):
-      s = (phase + k / BEADS_PER_RAIL) % 1.0
-      envelope = math.sin(math.pi * s)
-      for side in (-1.0, 1.0):
-        pts = []
-        for j in range(BEAD_TAIL):
-          sj = s - j * BEAD_TAIL_STEP
-          if sj <= 0.0:
-            break
-          x = 1.0 / (1.0 / x0 + (1.0 / x1 - 1.0 / x0) * sj)  # even speed on screen
-          p = projector.to_screen(x, float(projector.path_y(x)) + side * RAIL_OFFSET, 0.0)
-          if p is None:
-            break
-          pts.append((x, p))
-        if not pts:
+    runs = (phase + np.arange(BEADS_PER_RAIL) / BEADS_PER_RAIL) % 1.0
+    # every point of every bead and its streak (bead, tail point) projected in one go, for each rail
+    sj = runs[:, None] - np.arange(BEAD_TAIL)[None, :] * BEAD_TAIL_STEP
+    xs = 1.0 / (1.0 / x0 + (1.0 / x1 - 1.0 / x0) * np.maximum(sj, 1e-3))  # even speed on screen
+    path_y = projector.path_y(xs)
+    head_rgb = lat_acc_colors(np.interp(xs[:, 0], self._xs, self._severity))
+    for side in (-1.0, 1.0):
+      screen, ok = projector.to_screen_many(xs, path_y + side * RAIL_OFFSET)
+      ok &= sj > 0.0
+      for k in range(BEADS_PER_RAIL):
+        count = int(np.argmin(ok[k])) if not ok[k].all() else BEAD_TAIL  # a streak ends at its first point out of view
+        if count == 0:
           continue
-        x_head, head = pts[0]
-        rgb = lat_acc_color(float(np.interp(x_head, self._xs, self._severity)))
-        r = float(np.clip(140.0 / x_head, 4.0, 9.0))
-        for j in range(len(pts) - 1):
+        envelope = math.sin(math.pi * runs[k])
+        pts = screen[k, :count]
+        r = clamp(140.0 / xs[k, 0], 4.0, 9.0)
+        for j in range(count - 1):
           fade = alpha * envelope * (1.0 - (j + 1) / BEAD_TAIL)
-          _line(pts[j][1], pts[j + 1][1], r * 1.5 * (1.0 - j / BEAD_TAIL), rgba(WHITE, 0.8 * fade))
-        rl.draw_circle_v(rl.Vector2(*head), r * 2.8, rgba(rgb, 0.22 * alpha * envelope))
-        rl.draw_circle_v(rl.Vector2(*head), r, rgba(WHITE, 0.95 * alpha * envelope))
+          _line(pts[j], pts[j + 1], r * 1.5 * (1.0 - j / BEAD_TAIL), rgba(WHITE, 0.8 * fade))
+        head = rl.Vector2(float(pts[0, 0]), float(pts[0, 1]))
+        rl.draw_circle_v(head, r * 2.8, rgba(head_rgb[k], 0.22 * alpha * envelope))
+        rl.draw_circle_v(head, r, rgba(WHITE, 0.95 * alpha * envelope))
 
   # ---- gate ----
 
@@ -318,24 +369,24 @@ class CurveHologram:
     nx, ny = -math.sin(theta), math.cos(theta)  # right-hand normal of the path
     left = (ax - GATE_HALF_WIDTH * nx, y_c - GATE_HALF_WIDTH * ny)
     right = (ax + GATE_HALF_WIDTH * nx, y_c + GATE_HALF_WIDTH * ny)
-    projected = [projector.to_screen(px, py, h) for px, py in (left, right) for h in (0.0, GATE_HEIGHT)]
-    corners = [c for c in projected if c is not None]
-    if len(corners) != len(projected):
+    screen, ok = projector.to_screen_many([left[0], left[0], right[0], right[0]], [left[1], left[1], right[1], right[1]],
+                                          [0.0, GATE_HEIGHT, 0.0, GATE_HEIGHT])
+    if not ok.all():
       return
-    (blx, bly), (tlx, tly), (brx, bry), (trx, try_) = corners
+    (blx, bly), (tlx, tly), (brx, bry), (trx, try_) = screen.tolist()
     bl, tl, br, tr = (blx, bly), (tlx, tly), (brx, bry), (trx, try_)
 
     rgb = lat_acc_color(self._apex_lat)
     px_per_m = math.hypot(brx - blx, bry - bly) / (2 * GATE_HALF_WIDTH)
-    th = float(np.clip(0.1 * px_per_m, *GATE_LINE))
+    th = clamp(0.1 * px_per_m, *GATE_LINE)
     pulse = 0.85 + 0.15 * math.sin(rl.get_time() * 2 * math.pi / 1.4)
 
     # glassy curtain between the posts, clear at the road and brightest at the bar
     glass = tuple(0.55 * c + 0.45 * 255 for c in rgb)
     slices = 6
     for i in range(slices):
-      a, b = i / slices, (i + 1) / slices
-      quad = [_lerp_pt(bl, tl, a), _lerp_pt(br, tr, a), _lerp_pt(br, tr, b), _lerp_pt(bl, tl, b)]
+      lo, hi = i / slices, (i + 1) / slices
+      quad = [_lerp_pt(bl, tl, lo), _lerp_pt(br, tr, lo), _lerp_pt(br, tr, hi), _lerp_pt(bl, tl, hi)]
       _fill_convex(quad, rgba(glass, (0.015 + 0.02 * (i + 1) ** 1.2) * alpha))
     _line(bl, br, th * 0.7, rgba(rgb, 0.55 * alpha))  # footing on the road
 
@@ -366,7 +417,7 @@ class CurveHologram:
     text_sz = measure_value_with_unit(self._font_bold, speed, num_size, self._font_semi_bold, unit, unit_size, gap=6.0)
     w = pad_x * 2 + arrow_w + gap + text_sz.x
     h = text_sz.y * 0.92 + pad_y * 2
-    x = float(np.clip(cx - w / 2, rect.x + 10, rect.x + rect.width - 10 - w))
+    x = clamp(cx - w / 2, rect.x + 10, rect.x + rect.width - 10 - w)
     y = max(bottom - stem - h, rect.y + 10)
 
     _line((cx, y + h), (cx, bottom), 5.0, rgba(rgb, 0.9 * alpha))
@@ -375,7 +426,13 @@ class CurveHologram:
     pill = rl.Rectangle(x, y, w, h)
     rl.draw_rectangle_rounded(rl.Rectangle(x + 2, y + 4, w, h), roundness, 14, rgba((0, 0, 0), 0.3 * alpha))
     rl.draw_rectangle_rounded(pill, roundness, 14, rgba(INK, 0.82 * alpha))
-    rl.draw_rectangle_rounded_lines_ex(pill, roundness, 14, 5.0, rgba(rgb, (0.8 + 0.2 * pulse) * alpha))
+    if self._too_fast:
+      # faster than the bend calls for: the label flashes red, in step with the gate
+      flash = 0.5 + 0.5 * math.sin(rl.get_time() * 2 * math.pi / TOO_FAST_PERIOD)
+      rl.draw_rectangle_rounded(pill, roundness, 14, rgba(TOO_FAST_RGB, (0.25 + 0.35 * flash) * alpha))
+      rl.draw_rectangle_rounded_lines_ex(pill, roundness, 14, 7.0, rgba(TOO_FAST_RGB, alpha))
+    else:
+      rl.draw_rectangle_rounded_lines_ex(pill, roundness, 14, 5.0, rgba(rgb, (0.8 + 0.2 * pulse) * alpha))
 
     ax = x + pad_x
     cy = y + h / 2

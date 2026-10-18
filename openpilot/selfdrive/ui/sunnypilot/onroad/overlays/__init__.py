@@ -12,6 +12,7 @@ import pyray as rl
 
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.curve_hologram import CurveHologram
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.disengage_meter import DisengageMeter
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.drive_notifications import DriveNotifications
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.driver_flags import DriverFlags
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.follow_ghost import FollowGhost
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.hard_brake_flash import HardBrakeFlash
@@ -25,7 +26,8 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.threat_board import Threa
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.track_brackets import TrackBrackets
 
 # drawn in this order, warnings last so they sit on top
-HUD_OVERLAY_TYPES: list[type] = [PaceBorder, RadarScope, ThreatBoard, StopCard, DetectionLogPanel, DisengageMeter, DriverFlags, HardBrakeFlash]
+HUD_OVERLAY_TYPES: list[type] = [PaceBorder, RadarScope, ThreatBoard, StopCard, DetectionLogPanel, DriveNotifications, DisengageMeter, DriverFlags,
+                                 HardBrakeFlash]
 ROAD_OVERLAY_TYPES: list[type] = [CurveHologram, StopLine, FollowGhost, LeadWake, TrackBrackets]
 
 

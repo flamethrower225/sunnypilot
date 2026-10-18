@@ -11,7 +11,7 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import draw_triangle, rgba
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import clamp, draw_triangle, rgba
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.projection import RoadProjector
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
@@ -145,7 +145,7 @@ class LeadWake:
       p = projector.to_screen(pt.x, pt.y, 0.0)
       if p is None:
         continue
-      reveal = float(np.clip(alpha * 1.8 - i * 0.35, 0.0, 1.0))  # chevrons come in one after the other, nearest the lead first
+      reveal = clamp(alpha * 1.8 - i * 0.35, 0.0, 1.0)  # chevrons come in one after the other, nearest the lead first
       pulse = 0.78 + 0.22 * math.sin(now * 2 * math.pi / PULSE_PERIOD - i * 1.1)
       self._draw_chevron(rect, pt, p, float(np.interp(pt.t, WAKE_TIMES, WAKE_ALPHA)) * pulse * reveal)
 
@@ -154,8 +154,8 @@ class LeadWake:
     """Same shape and scaling as the lead chevron in ModelRenderer._update_lead_vehicle: apex at the road point, base toward us."""
     if opacity < 0.01:
       return
-    sz = float(np.clip((25 * 30) / (pt.x / 3 + 30), 15.0, 30.0)) * 2.35 * 0.95
-    x = float(np.clip(screen[0], rect.x, rect.x + rect.width - sz / 2))
+    sz = clamp((25 * 30) / (pt.x / 3 + 30), 15.0, 30.0) * 2.35 * 0.95
+    x = clamp(screen[0], rect.x, rect.x + rect.width - sz / 2)
     y = min(screen[1], rect.y + rect.height - sz * 0.6)
     g_xo, g_yo = sz / 5, sz / 10
 

@@ -45,8 +45,27 @@ WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 
 
+_COLORS: dict[tuple[int, int, int, int], rl.Color] = {}
+MAX_CACHED_COLORS = 4096
+
+
+def clamp(value: float, lo: float, hi: float) -> float:
+  """np.clip for one number, without numpy's overhead (several microseconds a call, and the overlays make hundreds a frame). Like
+  np.clip, hi wins when lo > hi."""
+  value = lo if value < lo else value
+  return hi if value > hi else value
+
+
 def rgba(rgb, alpha: float) -> rl.Color:
-  return rl.Color(int(rgb[0]), int(rgb[1]), int(rgb[2]), int(np.clip(alpha, 0.0, 1.0) * 255))
+  """rgb with an alpha of 0 to 1. Colors are cached: building an rl.Color goes through cffi and costs more than the draw call it is
+  for, and the overlays ask for the same few hundred colors every frame. Callers must not modify the returned color."""
+  key = (int(rgb[0]), int(rgb[1]), int(rgb[2]), int(clamp(alpha, 0.0, 1.0) * 255))
+  color = _COLORS.get(key)
+  if color is None:
+    if len(_COLORS) >= MAX_CACHED_COLORS:
+      _COLORS.clear()
+    color = _COLORS[key] = rl.Color(*key)
+  return color
 
 
 def zone_bands(t_follow: float, max_gap: float) -> list[tuple[GapZone, float, float]]:

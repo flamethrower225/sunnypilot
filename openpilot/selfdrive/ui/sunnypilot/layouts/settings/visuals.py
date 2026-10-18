@@ -129,13 +129,13 @@ class VisualsLayout(Widget):
         lambda: tr("Stop Detection"),
         tr("Show the moment the driving model plans a stop, such as for a red light, stop sign or stopped traffic. " +
            "A card shows the distance, whether a car is the reason, and whether openpilot will stop for it, and a stop " +
-           "line is drawn on the road. The model doesn't name lights or signs, so a stop with no car ahead is shown as " +
-           "likely a light, sign or crossing."),
+           "line is drawn on the road, with a dashed BRAKE mark where gentle braking has to start. The model doesn't name " +
+           "lights or signs, so a stop with no car ahead is shown as likely a light, sign or crossing."),
       ),
       "DetectionLog": (
         lambda: tr("Detection Log"),
-        tr("Show what the model and planner pick up: planned stops, go, new leads, cut-ins, curves and predicted hard " +
-           "braking. While driving only the newest shows, for a few seconds. When stopped, the last few are listed with " +
+        tr("Show what the model and planner pick up: planned stops, go, new leads, cut-ins, curves, predicted hard " +
+           "braking and drive notifications. While driving only the newest shows, for a few seconds. When stopped, the last few are listed with " +
            "the time each was first seen."),
       ),
       "LeadGapHistory": (
@@ -152,12 +152,14 @@ class VisualsLayout(Widget):
       ),
       "CurveHologram": (
         lambda: tr("Curve Preview"),
-        tr("In curves, light up the path edges by predicted sideways acceleration and show a suggested speed at the sharpest point."),
+        tr("In curves, light up the path edges by predicted sideways acceleration and show a suggested speed at the sharpest point. " +
+           "The speed flashes red while you are well over it."),
       ),
       "RadarScope": (
         lambda: tr("Radar Scope"),
         tr("Show a top-down map of every radar track, the lanes and the lead car on the left side of the screen. " +
-           "With a radar that reports only the car ahead, or no radar tracks, it shows the leads openpilot picks."),
+           "With a radar that reports only the car ahead, or no radar tracks, it shows the leads openpilot picks. " +
+           "The lane beside the car lights up when the blind spot monitor sees something there."),
       ),
       "RadarTrackBrackets": (
         lambda: tr("Radar Track Brackets"),
@@ -176,9 +178,17 @@ class VisualsLayout(Widget):
         lambda: tr("Pace Border"),
         tr("Glow the screen edges when you are not slowing enough for the car ahead or for a planned stop at a light or sign. " +
            "Yellow means ease off, orange brake, red brake hard, and it flashes faster the more braking is missing. " +
-           "It stays dark while the car is already slowing enough, and pulses green when it is time to go. " +
+           "It also covers a sharp curve ahead, and stays dark while the car is already slowing enough. It pulses green when it is " +
+           "time to go, and gives the edge to the hard brake warning while that shows. " +
            "Along the bottom, four lights read like a runway PAPI whenever there is something to slow for: two white and two " +
            "red is on profile, more red means brake more (all red flashes), more white means ease off."),
+      ),
+      "DriveNotifications": (
+        lambda: tr("Drive Notifications"),
+        tr("Short advisories at the top right: pass a lead that is well under the speed limit (on the side with an open lane and " +
+           "no car in the blind spot), stopped traffic ahead while you are still at speed, a sharp curve you aren't slowing for, " +
+           "a new speed limit, speeding well over it, and a break after two hours. One at a time, each with a cooldown, and " +
+           "each is also listed in the Detection Log."),
       ),
       "HardBrakeFlash": (
         lambda: tr("Hard Brake Warning"),
@@ -186,7 +196,8 @@ class VisualsLayout(Widget):
       ),
       "DriverFlags": (
         lambda: tr("Driver Monitoring Flags"),
-        tr("Show PHONE or EYES CLOSED next to the driver monitoring icon when the driver camera detects them."),
+        tr("Show DROWSY, PHONE or DISTRACTED next to the driver monitoring icon when the driver camera detects them. " +
+           "DISTRACTED is driver monitoring's own call that you are looking away from the road."),
       ),
     }
     self._overlay_toggles = {}

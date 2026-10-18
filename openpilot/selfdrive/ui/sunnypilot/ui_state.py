@@ -59,6 +59,7 @@ class UIStateSP:
     self.follow_ghost: bool = False
     self.hard_brake_flash: bool = False
     self.pace_border: bool = False
+    self.drive_notifications: bool = False
     self.lead_braking_wake: bool = False
     self.lead_gap_history: bool = False
     self.radar_scope: bool = False
@@ -189,6 +190,7 @@ class UIStateSP:
     self.follow_ghost = self.params.get_bool("FollowGhost")
     self.hard_brake_flash = self.params.get_bool("HardBrakeFlash")
     self.pace_border = self.params.get_bool("PaceBorder")
+    self.drive_notifications = self.params.get_bool("DriveNotifications")
     self.lead_braking_wake = self.params.get_bool("LeadBrakingWake")
     self.lead_gap_history = self.params.get_bool("LeadGapHistory")
     self.radar_scope = self.params.get_bool("RadarScope")

@@ -15,7 +15,8 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import DeveloperUiState
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, TEXT_MIN, WHITE, ZONE_RGB, rgba, draw_text, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone, ZoneHysteresis, format_distance
-from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import Lane, RadarFeed, RadarTrack, board_rows, ttc_zone
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import Lane, RadarFeed, RadarTrack, board_rows, ttc_zone, \
+  shared_radar_feed
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -81,7 +82,7 @@ class ThreatBoard:
       self._alpha.x = 0.0
       self._rows.clear()
       return
-    self._feed.update(ui_state.sm, ui_state.started_frame)
+    self._feed = shared_radar_feed(ui_state.sm, ui_state.started_frame, self._dt)
     ranked = board_rows(self._feed.tracks, self._feed.leads, MAX_ROWS) if self._feed.available else []
 
     seen = set()

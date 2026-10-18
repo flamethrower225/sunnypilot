@@ -6,8 +6,9 @@ See the LICENSE.md file in the root directory for more details.
 
 Pace Border: a glow around the screen edge that tells the driver, without reading anything, whether they are slowing enough.
 
-Each frame it works out the deceleration needed to settle at the gap the longitudinal planner targets behind the lead, and the
-deceleration needed to stop just short of a planned stop (a light or sign, from the stop detector). The larger of the two, minus
+Each frame it works out the deceleration needed to settle at the gap the longitudinal planner targets behind the lead, the
+deceleration needed to stop just short of a planned stop (a light or sign, from the stop detector), and the deceleration needed to
+be at a bend's advisory speed before its tightest point (the curve preview's speed). The largest of them, minus
 the deceleration the car already has, is the shortfall. No shortfall, no border. As it grows the glow turns yellow, then orange,
 then red, flashes faster and reaches further into the screen. When stopped and it is time to go, the edge pulses green.
 
@@ -28,9 +29,12 @@ import time
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, ZONE_RGB, rgba, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, ZONE_RGB, rgba
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import STOP_DISTANCE, GapZone, get_t_follow
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays import hard_brake_flash
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.curve_hologram import curve_ahead, curve_decel_needed
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import StopPhase, get_detection_feed
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.edge_glow import draw_edge_glow
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.follow_ghost import desired_gap
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import update_feed
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -52,7 +56,6 @@ GO_HZ, GO_DEPTH, GO_ALPHA, GO_TIME = 1.0, 90.0, 0.55, 2.5
 
 RISE_RC, FALL_RC = 0.08, 0.45  # s: react fast, calm down slowly so it doesn't flicker
 EDGE_LAYERS = 14
-EDGE_RADIUS = 36.0
 
 SHOW_DEMAND = 0.6          # m/s^2 of needed braking before the PAPI comes on (something to slow for)
 HIDE_DEMAND = 0.3          # and below this it goes off again
@@ -143,7 +146,7 @@ class PaceBorder:
     self._last = time.monotonic()
     self._go_until = 0.0
     self._go_prev = False
-    self.reason = ""  # "lead" or "stop", for tests and debugging
+    self.reason = ""  # "lead", "stop" or "curve", for tests and debugging
 
   def _demand(self) -> tuple[float, str]:
     sm = ui_state.sm
@@ -162,6 +165,11 @@ class PaceBorder:
       d = stop_demand(stop.stop_x, v_ego)
       if d > best:
         best, reason = d, "stop"
+    curve = curve_ahead(sm, ui_state.started_frame)
+    if curve is not None:
+      d = curve_decel_needed(v_ego, curve.speed, curve.x)
+      if d > best:
+        best, reason = d, "curve"
     return best, reason
 
   def update(self) -> None:
@@ -204,12 +212,14 @@ class PaceBorder:
       return
     u = self._urgency.x
     beat = 0.5 - 0.5 * math.cos(2 * math.pi * self._phase)
-    if u > 0.02:
+    # the hard brake warning has the edge to itself while it shows, so two glows never stack
+    edge_free = hard_brake_flash.warning_level() < 0.01
+    if u > 0.02 and edge_free:
       strength = lerp(FLASH_FLOOR, u) + (1 - lerp(FLASH_FLOOR, u)) * beat
-      draw_edge_glow(rect, urgency_color(u), lerp(DEPTH_PX, u), lerp(PEAK_ALPHA, u) * strength * min(u * 4, 1.0))
-    elif time.monotonic() < self._go_until:
+      draw_edge_glow(rect, urgency_color(u), lerp(DEPTH_PX, u), lerp(PEAK_ALPHA, u) * strength * min(u * 4, 1.0), EDGE_LAYERS)
+    elif time.monotonic() < self._go_until and edge_free:
       go_beat = 0.5 - 0.5 * math.cos(2 * math.pi * GO_HZ * time.monotonic())
-      draw_edge_glow(rect, GREEN, GO_DEPTH, GO_ALPHA * (0.3 + 0.7 * go_beat))
+      draw_edge_glow(rect, GREEN, GO_DEPTH, GO_ALPHA * (0.3 + 0.7 * go_beat), EDGE_LAYERS)
     papi = self._papi_alpha.x
     if papi > 0.01:
       if self.reds == 4:  # all red flashes in step with the glow
@@ -231,21 +241,3 @@ def draw_papi(rect: rl.Rectangle, colors: list[tuple], alpha: float) -> None:
     rl.draw_rectangle_rounded(rl.Rectangle(x - 6, core_y - 6, w + 12, PAPI_CORE_H + 12), 1.0, 12, rgba(rgb, 0.35 * alpha))
     rl.draw_rectangle_rounded(rl.Rectangle(x, core_y, w, PAPI_CORE_H), 1.0, 12, rgba(rgb, alpha))
     x += w + PAPI_GAP
-
-
-def draw_edge_glow(rect: rl.Rectangle, rgb: tuple, depth: float, alpha: float) -> None:
-  """Nested rounded outlines, each inset deeper and fainter, so the edge fades into the picture. Bands overlap by half so there are
-  no seams, and the corner radius shrinks with the inset so they stay parallel."""
-  if alpha < 0.01:
-    return
-  step = depth / EDGE_LAYERS
-  thickness = 2 * step
-  for i in range(EDGE_LAYERS):
-    inset = i * step
-    layer = rl.Rectangle(rect.x + inset, rect.y + inset, rect.width - 2 * inset, rect.height - 2 * inset)
-    radius = EDGE_RADIUS - inset
-    if radius < thickness:  # raylib's thick outline breaks when the thickness passes the corner radius
-      radius = 0.0
-    falloff = (1.0 - i / EDGE_LAYERS) ** 2
-    rl.draw_rectangle_rounded_lines_ex(layer, roundness(radius, layer.width, layer.height) if radius else 0.0, 12, thickness,
-                                       rgba(rgb, min(alpha * falloff, 1.0)))

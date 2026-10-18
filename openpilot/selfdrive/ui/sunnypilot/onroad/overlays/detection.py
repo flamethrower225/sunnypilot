@@ -18,6 +18,9 @@ from enum import IntEnum
 
 import numpy as np
 
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import clamp
+from openpilot.selfdrive.ui.sunnypilot.model_plan import model_plan
+
 V_STOP = 0.5               # m/s, planned speed that counts as stopped
 MIN_APPROACH_SPEED = 2.0   # m/s, below this we're creeping or stopped, not approaching a stop
 STOPPED_SPEED = 0.3        # m/s, same as drive_helpers.should_stop
@@ -59,6 +62,17 @@ class EventKind(IntEnum):
   LEAD_DEPART = 7
   CURVE = 8
   HARD_BRAKE = 9
+  # drive notifications
+  STOPPED_TRAFFIC = 10
+  SHARP_CURVE = 11
+  SLOW_LEAD = 12
+  OVER_LIMIT = 13
+  SPEED_LIMIT = 14
+  BREAK = 15
+
+
+NOTIFICATION_KINDS = frozenset({EventKind.STOPPED_TRAFFIC, EventKind.SHARP_CURVE, EventKind.SLOW_LEAD, EventKind.OVER_LIMIT,
+                                EventKind.SPEED_LIMIT, EventKind.BREAK})
 
 
 @dataclass(frozen=True)
@@ -70,6 +84,7 @@ class DetectionEvent:
   value: float | None = None       # kind specific: lateral accel for CURVE
   car_ahead: bool | None = None    # STOP and GO: whether a car is the reason
   radar: bool | None = None        # LEAD and CUT_IN: radar matched
+  note: str | None = None          # drive notifications: what the card said
 
 
 def predicted_stop_distance(position_x, velocity_x, v_stop: float = V_STOP) -> float | None:
@@ -265,7 +280,7 @@ class DetectionFeed:
     if model_frame < started_frame or model_frame == self._last_model_frame:
       return
     self._last_model_frame = model_frame
-    dt = 0.05 if self._last_mono is None else float(np.clip(now_mono - self._last_mono, 0.01, 0.5))
+    dt = 0.05 if self._last_mono is None else clamp(now_mono - self._last_mono, 0.01, 0.5)
     self._last_mono = now_mono
 
     model = sm['modelV2']
@@ -273,10 +288,8 @@ class DetectionFeed:
     lead = sm['radarState'].leadOne
     lead_present = bool(radar_ok and lead.present)
     v_ego = sm['carState'].vEgo
-    position_x, velocity_x = list(model.position.x), list(model.velocity.x)
-    yaw, vx = list(model.orientationRate.z), list(model.velocity.x)
-    n = min(len(yaw), len(vx))
-    lat = [abs(yaw[i] * vx[i]) for i in range(n)]
+    plan = model_plan(sm, started_frame)
+    position_x, velocity_x, lat = plan.x, plan.v, plan.lat_acc
     e2e = sm['longitudinalPlanSP'].e2eAlerts
 
     new = self.stop.update(now_wall, now_mono, dt, position_x, velocity_x, v_ego, lead_present, lead.dRel)
