@@ -25,6 +25,9 @@ STATIONARY_SPEED = 1.0         # m/s, |absolute speed| below this is a sign, gua
 MAX_POINTS = 48                # radarTracks never carries more than this many useful points
 BOARD_TTC_MAX = 20.0           # s, closing slower than this isn't worth a row on the threat board
 NO_TRACK = -1
+CAMERA_ID_BASE = 100000        # camera track ids are offset so they never collide with radar track ids
+CAMERA_MAX_AGE = 1.0           # s since scened last saw a car before it's left out
+CAMERA_DUPLICATE = (4.0, 1.6)  # m along and across: a camera car this close to a radar one is the same car
 VISION_LEAD_IDS = (-2, -3)     # leadOne and leadTwo when no radar track is behind them, so each still has an id of its own
 RADAR_TO_CAMERA = 1.52         # m, the model's distances are from the camera, radar distances from the front bumper
 
@@ -60,6 +63,7 @@ class RadarTrack:
   lane: Lane
   ttc: float        # s, inf unless closing
   lateral_estimated: bool = False  # the radar gave no lateral position, y_rel was filled in (see parse_tracks)
+  camera: bool = False             # seen by the cameras (scened), not the radar
 
   @property
   def y_right(self) -> float:
@@ -94,10 +98,11 @@ def time_to_collision(d_rel: float, v_rel: float) -> float:
   return d_rel / closing if closing > MIN_CLOSING_SPEED else math.inf
 
 
-def make_track(track_id: int, d_rel: float, y_rel: float, v_rel: float, v_ego: float, lateral_estimated: bool = False) -> RadarTrack:
+def make_track(track_id: int, d_rel: float, y_rel: float, v_rel: float, v_ego: float, lateral_estimated: bool = False,
+               camera: bool = False) -> RadarTrack:
   v_abs = v_rel + v_ego
   return RadarTrack(int(track_id), d_rel, y_rel, v_rel, v_abs, classify_motion(v_abs), lane_of(y_rel), time_to_collision(d_rel, v_rel),
-                    lateral_estimated)
+                    lateral_estimated, camera)
 
 
 LateralFallback = Callable[[int, float], float]
@@ -221,14 +226,14 @@ class TrackSmoother:
         f[1].update(t.y_rel)
         f[2].update(t.v_rel)
       filters[t.track_id] = f
-      smoothed.append(make_track(t.track_id, f[0].x, f[1].x, f[2].x, v_ego, t.lateral_estimated))
+      smoothed.append(make_track(t.track_id, f[0].x, f[1].x, f[2].x, v_ego, t.lateral_estimated, t.camera))
     self._filters = filters
     return smoothed
 
 
 def service_fresh(sm, service: str, started_frame: int) -> bool:
   """Received since the drive started, flagged valid, and still arriving."""
-  return bool(sm.valid[service] and sm.recv_frame[service] >= started_frame and sm.alive[service])
+  return bool(sm.valid.get(service, False) and sm.recv_frame.get(service, -1) >= started_frame and sm.alive.get(service, False))
 
 
 class RadarFeed:
@@ -268,6 +273,9 @@ class RadarFeed:
     self.lead_ids = lead_track_ids(radar_state) if radar_state is not None else (NO_TRACK, NO_TRACK)
 
     raw = parse_tracks(sm['radarTracks'].points, self.v_ego, self._lateral_fallback(sm, started_frame, radar_state)) if tracks_ok else []
+    if service_fresh(sm, 'sceneDetectionSP', started_frame):
+      raw += camera_tracks(sm['sceneDetectionSP'].vehicles, raw, radar_state, self.v_ego)
+      self.available = True
     self.tracks = self._smoother.update(raw, self.v_ego)
     self.lead_one, self.lead_two = match_leads(self.tracks, self.lead_ids)
 
@@ -299,6 +307,22 @@ class RadarFeed:
         return -float(np.interp(d_rel + RADAR_TO_CAMERA, path[0], path[1]))  # the model's y is right positive
       return 0.0
     return lateral
+
+
+def camera_tracks(vehicles, radar: list[RadarTrack], radar_state, v_ego: float) -> list[RadarTrack]:
+  """scened's cars as tracks, leaving out any the radar (or radard's lead) already has, so a car shows once. On a radar that only
+  reports the car ahead these are all the other cars there are."""
+  known = [(t.d_rel, t.y_rel) for t in radar]
+  if radar_state is not None:
+    known += [(lead.dRel, lead.yRel) for lead in (radar_state.leadOne, radar_state.leadTwo) if lead.present]
+  out = []
+  for v in vehicles:
+    if v.lastSeen > CAMERA_MAX_AGE or not (math.isfinite(v.dRel) and math.isfinite(v.yRel)) or v.dRel <= 0.0:
+      continue
+    if any(abs(v.dRel - d) < CAMERA_DUPLICATE[0] and abs(v.yRel - y) < CAMERA_DUPLICATE[1] for d, y in known):
+      continue
+    out.append(make_track(CAMERA_ID_BASE + int(v.trackId), float(v.dRel), float(v.yRel), float(v.vRel), v_ego, camera=True))
+  return out
 
 
 _shared: RadarFeed | None = None

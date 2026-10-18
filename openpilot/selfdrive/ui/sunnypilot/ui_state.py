@@ -37,7 +37,7 @@ class UIStateSP:
     self.sm_services_ext = [
       "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP",
       "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay", "radarTracks",
-      "peripheralState"
+      "peripheralState", "sceneDetectionSP"
     ]
 
     self.sunnylink_state = SunnylinkState()
@@ -60,6 +60,7 @@ class UIStateSP:
     self.hard_brake_flash: bool = False
     self.pace_border: bool = False
     self.drive_notifications: bool = False
+    self.scene_detection: bool = False
     self.lead_braking_wake: bool = False
     self.lead_gap_history: bool = False
     self.radar_scope: bool = False
@@ -191,6 +192,7 @@ class UIStateSP:
     self.hard_brake_flash = self.params.get_bool("HardBrakeFlash")
     self.pace_border = self.params.get_bool("PaceBorder")
     self.drive_notifications = self.params.get_bool("DriveNotifications")
+    self.scene_detection = self.params.get_bool("SceneDetection")
     self.lead_braking_wake = self.params.get_bool("LeadBrakingWake")
     self.lead_gap_history = self.params.get_bool("LeadGapHistory")
     self.radar_scope = self.params.get_bool("RadarScope")

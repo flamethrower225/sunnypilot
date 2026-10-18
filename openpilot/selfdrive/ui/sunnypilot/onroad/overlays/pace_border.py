@@ -8,7 +8,8 @@ Pace Border: a glow around the screen edge that tells the driver, without readin
 
 Each frame it works out the deceleration needed to settle at the gap the longitudinal planner targets behind the lead, the
 deceleration needed to stop just short of a planned stop (a light or sign, from the stop detector), and the deceleration needed to
-be at a bend's advisory speed before its tightest point (the curve preview's speed). The largest of them, minus
+be at a bend's advisory speed before its tightest point (the curve preview's speed), and with Camera Object Detection on, the
+deceleration needed to stop for a red light (or a yellow there is room to stop for). The largest of them, minus
 the deceleration the car already has, is the shortfall. No shortfall, no border. As it grows the glow turns yellow, then orange,
 then red, flashes faster and reaches further into the screen. When stopped and it is time to go, the edge pulses green.
 
@@ -36,6 +37,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.curve_hologram import cur
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import StopPhase, get_detection_feed
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.edge_glow import draw_edge_glow
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.follow_ghost import desired_gap
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import current_light
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.stop_indicator import update_feed
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
@@ -47,6 +49,10 @@ INSIDE_GAP_DEMAND = 2.0    # m/s^2 asked for when sitting at half the target gap
 SHORTFALL_START = 0.4      # m/s^2 of missing deceleration before the border shows
 SHORTFALL_FULL = 3.5       # m/s^2 at which it is at full strength
 MIN_SPEED = 1.0            # m/s, below this there is nothing to slow for
+LIGHT_RED, LIGHT_YELLOW, LIGHT_GREEN = 1, 2, 3   # SceneDetectionSP.LightState
+GREEN_FRESH = 2.0          # s, a light that turned green this recently pulses the edge green while stopped
+LIGHT_SETBACK = 10.0       # m, the stop line is about this far before the light
+YELLOW_STOP_DECEL = 3.0    # m/s^2, a yellow that needs more than this to stop for is left out
 
 FLASH_HZ = (0.8, 4.5)      # flashes per second at the lowest and highest urgency
 DEPTH_PX = (60.0, 160.0)   # how far the glow reaches into the screen
@@ -146,7 +152,7 @@ class PaceBorder:
     self._last = time.monotonic()
     self._go_until = 0.0
     self._go_prev = False
-    self.reason = ""  # "lead", "stop" or "curve", for tests and debugging
+    self.reason = ""  # "lead", "stop", "light" or "curve", for tests and debugging
 
   def _demand(self) -> tuple[float, str]:
     sm = ui_state.sm
@@ -165,6 +171,13 @@ class PaceBorder:
       d = stop_demand(stop.stop_x, v_ego)
       if d > best:
         best, reason = d, "stop"
+    light = current_light(sm)
+    if light is not None and light.state in (LIGHT_RED, LIGHT_YELLOW) and math.isfinite(light.distance) and \
+       not (radar_ok and lead.present and lead.dRel < light.distance):
+      d = stop_demand(max(light.distance - LIGHT_SETBACK, 0.0), v_ego)
+      # a yellow you can't stop for gently is one to go through, not to brake hard for
+      if d > best and (light.state == LIGHT_RED or d <= YELLOW_STOP_DECEL):
+        best, reason = d, "light"
     curve = curve_ahead(sm, ui_state.started_frame)
     if curve is not None:
       d = curve_decel_needed(v_ego, curve.speed, curve.x)
@@ -198,7 +211,10 @@ class PaceBorder:
 
     stop = get_detection_feed().stop
     e2e = ui_state.sm['longitudinalPlanSP'].e2eAlerts
-    go = stop.phase == StopPhase.GO or bool(e2e.greenLightAlert) or bool(e2e.leadDepartAlert)
+    light = current_light()
+    light_went_green = light is not None and light.state == LIGHT_GREEN and light.age < GREEN_FRESH and \
+      ui_state.sm['carState'].vEgo < MIN_SPEED
+    go = stop.phase == StopPhase.GO or bool(e2e.greenLightAlert) or bool(e2e.leadDepartAlert) or light_went_green
     if go and not self._go_prev:
       self._go_until = now + GO_TIME
     self._go_prev = go

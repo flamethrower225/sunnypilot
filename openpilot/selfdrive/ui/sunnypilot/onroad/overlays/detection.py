@@ -69,10 +69,13 @@ class EventKind(IntEnum):
   OVER_LIMIT = 13
   SPEED_LIMIT = 14
   BREAK = 15
+  RED_LIGHT = 16
+  YELLOW_LIGHT = 17
+  LIGHT_GREEN = 18
 
 
 NOTIFICATION_KINDS = frozenset({EventKind.STOPPED_TRAFFIC, EventKind.SHARP_CURVE, EventKind.SLOW_LEAD, EventKind.OVER_LIMIT,
-                                EventKind.SPEED_LIMIT, EventKind.BREAK})
+                                EventKind.SPEED_LIMIT, EventKind.BREAK, EventKind.RED_LIGHT, EventKind.YELLOW_LIGHT, EventKind.LIGHT_GREEN})
 
 
 @dataclass(frozen=True)

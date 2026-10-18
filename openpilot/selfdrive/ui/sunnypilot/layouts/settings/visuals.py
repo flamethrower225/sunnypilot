@@ -190,6 +190,15 @@ class VisualsLayout(Widget):
            "a new speed limit, speeding well over it, and a break after two hours. One at a time, each with a cooldown, and " +
            "each is also listed in the Detection Log."),
       ),
+      "SceneDetection": (
+        lambda: tr("Camera Object Detection"),
+        tr("Run an object detector on the road cameras, next to the driving model, to read traffic lights and find the cars " +
+           "around you. The light shows in a chip at the top left (red, yellow or green, and how far), names the light on the " +
+           "stop card, feeds Pace Border and adds red light, yellow light and green light notifications. Cars it finds show " +
+           "as rounded squares on the radar scope and in the threat board and brackets, and a car beside you holds back the " +
+           "pass suggestion. It slows itself down whenever the driving model needs the time. Advisory only: it doesn't " +
+           "change how openpilot drives. Takes effect on the next drive."),
+      ),
       "HardBrakeFlash": (
         lambda: tr("Hard Brake Warning"),
         tr("Flash the screen edges when the driving model predicts hard braking ahead."),

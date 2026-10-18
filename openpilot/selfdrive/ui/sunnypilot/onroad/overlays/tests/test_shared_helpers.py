@@ -139,3 +139,16 @@ class TestEdgeGlowAndRuns(OpenpilotTestCase):
   def test_runs(self):
     assert runs(np.array([True, True, False, True, False, True, True, True])) == [(0, 2), (5, 8)]
     assert runs(np.array([], dtype=bool)) == []
+
+
+class TestBracketBoxes(OpenpilotTestCase):
+  def test_batch_matches_one_at_a_time(self):
+    from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import make_track
+    from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.track_brackets import project_box, project_boxes
+    p = RoadProjector(FakeRenderer())
+    tracks = [make_track(i, d, y, 0.0, 20.0) for i, (d, y) in enumerate(((12.0, 0.0), (30.0, -3.5), (60.0, 4.0), (0.5, 0.0)))]
+    for t, box in zip(tracks, project_boxes(p, tracks), strict=True):
+      one = project_box(p.to_screen, t.d_rel, t.y_right)
+      assert (box is None) == (one is None)
+      if box is not None:
+        assert np.allclose(box, one, atol=1e-2)

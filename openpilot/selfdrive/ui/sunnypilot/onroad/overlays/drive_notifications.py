@@ -13,6 +13,9 @@ Drive notifications: short advisories in a card at the top right, for things wor
   Speed limit      the limit changed
   Over the limit   well over the limit for a while (only when Speed Limit doesn't already warn)
   Break            two hours on the road
+  Red light        a red light ahead the car isn't braking enough for     } with Camera Object Detection on
+  Yellow light     it just turned yellow: room to stop or not             }
+  Light is green   stopped at a red that turned green                     }
 
 One card at a time, the most important first. Each kind has a cooldown so nothing nags, and nothing shows while you are already
 changing lanes. The logic below works on a DriveSnapshot and has no drawing in it; DriveNotifications reads one from the
@@ -36,6 +39,8 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import FT_PER_M, SNAP_DISTANCE, GapZone
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.curve_hologram import curve_ahead, curve_decel_needed
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import DetectionEvent, EventKind, get_detection_feed
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.light_view import current_light, draw_signal_head
+from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.radar_tracks import service_fresh
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode as SpeedLimitMode
 from openpilot.system.ui.lib.application import FontWeight, gui_app
@@ -78,17 +83,33 @@ OVER_SUSTAIN = 5.0               # s
 
 BREAK_AFTER = 2 * 3600.0         # s on the road
 
+# traffic lights (Camera Object Detection)
+LIGHT_RED, LIGHT_YELLOW, LIGHT_GREEN = 1, 2, 3
+LIGHT_SETBACK = 10.0             # m, the stop line is about this far before the light
+LIGHT_RANGE = (8.0, 150.0)       # m
+LIGHT_MIN_SPEED = 15 * MPH
+LIGHT_DECEL_MARGIN = 0.6         # m/s^2 more braking needed than the car has before it warns
+LIGHT_SUSTAIN = 0.3              # s
+YELLOW_FRESH = 1.5               # s, a yellow older than this is old news
+YELLOW_COMFORT_DECEL = 3.0       # m/s^2
+GREEN_FRESH = 2.0                # s
+GREEN_STOPPED_SPEED = 1.0        # m/s
+CAMERA_BESIDE = (-8.0, 25.0)     # m from the bumper: a camera car this close in the next lane blocks a lane change
+
 CARD_TTL_MIN = 3.0               # s a card stays at least, even when its reason is gone
 
 
 class NotifyKind(IntEnum):
   # in order of priority, most important first
   STOPPED_TRAFFIC = 0
-  SHARP_CURVE = 1
-  SLOW_LEAD = 2
-  OVER_LIMIT = 3
-  SPEED_LIMIT = 4
-  BREAK = 5
+  RED_LIGHT = 1
+  SHARP_CURVE = 2
+  YELLOW_LIGHT = 3
+  LIGHT_GREEN = 4
+  SLOW_LEAD = 5
+  OVER_LIMIT = 6
+  SPEED_LIMIT = 7
+  BREAK = 8
 
 
 class Icon(IntEnum):
@@ -101,6 +122,9 @@ class Icon(IntEnum):
   CURVE_RIGHT = 6
   CLOCK = 7
   WAIT = 8
+  SIGNAL_RED = 9
+  SIGNAL_YELLOW = 10
+  SIGNAL_GREEN = 11
 
 
 @dataclass(frozen=True)
@@ -136,6 +160,12 @@ class DriveSnapshot:
   apex_speed: float = math.inf     # m/s the bend calls for
   curve_right: bool = True
   drive_time: float = 0.0          # s since the drive started
+  # from Camera Object Detection (scened), when it's on
+  light_state: int = 0             # 0 unknown, 1 red, 2 yellow, 3 green (SceneDetectionSP.LightState)
+  light_distance: float = math.nan # m from the front bumper
+  light_age: float = 0.0           # s the state has held
+  left_busy: bool = False          # the cameras see a car in the lane beside us, just behind to a little ahead
+  right_busy: bool = False
 
 
 # ---- formatting ----
@@ -219,12 +249,12 @@ class SlowLeadRule(Rule):
     under = speed_text(reference - s.lead_v, s.is_metric)
     detail = tr("{} under limit").format(under) if s.speed_limit > 0 else tr("{} under set speed").format(under)
     rgb = ZONE_RGB[GapZone.OPEN]
-    if s.left_lane and not s.left_blindspot:
+    if s.left_lane and not (s.left_blindspot or s.left_busy):
       return Notification(self.kind, tr("SLOW LEAD"), tr("Pass on the left"), detail, rgb, Icon.LEFT, self._lead_id, s.lead_d)
     if s.left_lane:
       return Notification(self.kind, tr("SLOW LEAD"), tr("Left lane busy"), detail, ZONE_RGB[GapZone.CAUTION], Icon.WAIT, self._lead_id,
                           s.lead_d)
-    if s.right_lane and not s.right_blindspot:
+    if s.right_lane and not (s.right_blindspot or s.right_busy):
       return Notification(self.kind, tr("SLOW LEAD"), tr("Right lane open"), detail, rgb, Icon.RIGHT, self._lead_id, s.lead_d)
     return None  # nowhere to go, so nothing to suggest
 
@@ -345,8 +375,79 @@ class BreakRule(Rule):
     self._next += BREAK_AFTER
 
 
+def light_stop_decel(v_ego: float, light_distance: float) -> float:
+  """m/s^2 to stop LIGHT_SETBACK short of a light (the stop line is before it)."""
+  return v_ego ** 2 / (2 * max(light_distance - LIGHT_SETBACK, 1.0))
+
+
+class RedLightRule(Rule):
+  """Coming up on a red light faster than the braking so far will stop for."""
+  kind = NotifyKind.RED_LIGHT
+  ttl = 8.0
+  cooldown = 15.0
+  sticky = True
+
+  def __init__(self):
+    self._since: float | None = None
+
+  def check(self, s: DriveSnapshot) -> Notification | None:
+    hot = (s.light_state == LIGHT_RED and math.isfinite(s.light_distance) and LIGHT_RANGE[0] <= s.light_distance <= LIGHT_RANGE[1]
+           and s.v_ego > LIGHT_MIN_SPEED and light_stop_decel(s.v_ego, s.light_distance) > max(-s.a_ego, 0.0) + LIGHT_DECEL_MARGIN)
+    if not hot:
+      self._since = None
+      return None
+    self._since = s.now if self._since is None else self._since
+    if s.now - self._since < LIGHT_SUSTAIN:
+      return None
+    return Notification(self.kind, tr("RED LIGHT"), tr("Red light ahead"),
+                        tr("Stop in {}").format(distance_text(max(s.light_distance - LIGHT_SETBACK, 0.0), s.is_metric)),
+                        ZONE_RGB[GapZone.CRITICAL], Icon.SIGNAL_RED, None, s.light_distance)
+
+
+class YellowLightRule(Rule):
+  """The light just turned yellow: whether there's room to stop at comfortable braking. It doesn't tell anyone to go."""
+  kind = NotifyKind.YELLOW_LIGHT
+  ttl = 4.0
+  cooldown = 15.0
+
+  def check(self, s: DriveSnapshot) -> Notification | None:
+    if not (s.light_state == LIGHT_YELLOW and s.light_age < YELLOW_FRESH and math.isfinite(s.light_distance)
+            and LIGHT_RANGE[0] <= s.light_distance <= LIGHT_RANGE[1] and s.v_ego > LIGHT_MIN_SPEED):
+      return None
+    need = light_stop_decel(s.v_ego, s.light_distance)
+    text = tr("Room to stop") if need <= YELLOW_COMFORT_DECEL else tr("Too close to stop gently")
+    return Notification(self.kind, tr("YELLOW LIGHT"), text, distance_text(s.light_distance, s.is_metric), ZONE_RGB[GapZone.CAUTION],
+                        Icon.SIGNAL_YELLOW, None, s.light_distance)
+
+
+class LightGreenRule(Rule):
+  """Stopped at a red, and it turned green."""
+  kind = NotifyKind.LIGHT_GREEN
+  ttl = 5.0
+  cooldown = 10.0
+
+  def __init__(self):
+    self._red_while_stopped = False
+
+  def check(self, s: DriveSnapshot) -> Notification | None:
+    stopped = s.v_ego < GREEN_STOPPED_SPEED
+    if not stopped:
+      self._red_while_stopped = False
+      return None
+    if s.light_state == LIGHT_RED:
+      self._red_while_stopped = True
+    if self._red_while_stopped and s.light_state == LIGHT_GREEN and s.light_age < GREEN_FRESH:
+      return Notification(self.kind, tr("GREEN LIGHT"), tr("Light is green"), tr("Check the intersection"), ZONE_RGB[GapZone.GOOD],
+                          Icon.SIGNAL_GREEN)
+    return None
+
+  def shown(self, n: Notification) -> None:
+    self._red_while_stopped = False
+
+
 def default_rules() -> list[Rule]:
-  rules: list[Rule] = [StoppedTrafficRule(), SharpCurveRule(), SlowLeadRule(), OverLimitRule(), SpeedLimitRule(), BreakRule()]
+  rules: list[Rule] = [StoppedTrafficRule(), RedLightRule(), SharpCurveRule(), YellowLightRule(), LightGreenRule(), SlowLeadRule(),
+                       OverLimitRule(), SpeedLimitRule(), BreakRule()]
   return sorted(rules, key=lambda r: r.kind)
 
 
@@ -449,6 +550,19 @@ def read_snapshot(sm, now: float) -> DriveSnapshot:
     left_lane, right_lane = model_lanes(sm)
   curve = curve_ahead(sm, started)
 
+  light = current_light(sm)
+  left_busy = right_busy = False
+  if ui_state.scene_detection and service_fresh(sm, 'sceneDetectionSP', started):
+    for v in sm['sceneDetectionSP'].vehicles:
+      if v.lastSeen > 1.0:
+        continue
+      if v.lane == -1:
+        left_lane = True   # a car driving there is the best sign there's a lane
+        left_busy |= CAMERA_BESIDE[0] <= v.dRel <= CAMERA_BESIDE[1]
+      elif v.lane == 1:
+        right_lane = True
+        right_busy |= CAMERA_BESIDE[0] <= v.dRel <= CAMERA_BESIDE[1]
+
   lane_change = sm['modelV2'].meta.laneChangeState if sm.recv_frame['modelV2'] >= started else LaneChangeState.off
   return DriveSnapshot(
     now=now, is_metric=ui_state.is_metric, v_ego=v_ego, a_ego=float(cs.aEgo),
@@ -458,11 +572,16 @@ def read_snapshot(sm, now: float) -> DriveSnapshot:
     changing_lanes=bool(cs.leftBlinker or cs.rightBlinker or lane_change != LaneChangeState.off),
     apex_x=curve.x if curve else None, apex_speed=curve.speed if curve else math.inf, curve_right=curve.right if curve else True,
     drive_time=now - ui_state.started_time if ui_state.started_time else 0.0,
+    light_state=light.state if light else 0, light_distance=light.distance if light else math.nan, light_age=light.age if light else 0.0,
+    left_busy=left_busy, right_busy=right_busy,
   )
 
 
 LOG_KINDS = {
   NotifyKind.STOPPED_TRAFFIC: EventKind.STOPPED_TRAFFIC,
+  NotifyKind.RED_LIGHT: EventKind.RED_LIGHT,
+  NotifyKind.YELLOW_LIGHT: EventKind.YELLOW_LIGHT,
+  NotifyKind.LIGHT_GREEN: EventKind.LIGHT_GREEN,
   NotifyKind.SHARP_CURVE: EventKind.SHARP_CURVE,
   NotifyKind.SLOW_LEAD: EventKind.SLOW_LEAD,
   NotifyKind.OVER_LIMIT: EventKind.OVER_LIMIT,
@@ -585,6 +704,9 @@ class DriveNotifications:
       rl.draw_ring(c, 18, 24, 0, 360, 32, ink)
       rl.draw_line_ex(c, rl.Vector2(cx, cy - 13), 5, ink)
       rl.draw_line_ex(c, rl.Vector2(cx + 10, cy), 5, ink)
+    elif icon in (Icon.SIGNAL_RED, Icon.SIGNAL_YELLOW, Icon.SIGNAL_GREEN):
+      rl.draw_circle_v(c, ICON_R, rgba(BLACK, alpha))   # a signal head reads best on black
+      draw_signal_head(cx, cy, 0.72, {Icon.SIGNAL_RED: 1, Icon.SIGNAL_YELLOW: 2, Icon.SIGNAL_GREEN: 3}[icon], alpha)
     elif icon == Icon.WAIT:
       rl.draw_rectangle_rounded(rl.Rectangle(cx - 13, cy - 15, 9, 30), 0.5, 4, ink)
       rl.draw_rectangle_rounded(rl.Rectangle(cx + 4, cy - 15, 9, 30), 0.5, 4, ink)

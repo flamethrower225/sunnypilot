@@ -12,3 +12,6 @@
 
 openpilot/selfdrive/car/tests/test_models_segs.txt filter=lfs diff=lfs merge=lfs -text
 openpilot/common/hardware/comma/updater filter=lfs diff=lfs merge=lfs -text
+
+# the scene detector is small enough to keep in git itself, outside LFS
+openpilot/sunnypilot/selfdrive/scened/models/scene_detector.onnx -filter -diff -merge -text binary
