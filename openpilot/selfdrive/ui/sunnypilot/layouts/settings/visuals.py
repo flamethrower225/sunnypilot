@@ -176,7 +176,9 @@ class VisualsLayout(Widget):
         lambda: tr("Pace Border"),
         tr("Glow the screen edges when you are not slowing enough for the car ahead or for a planned stop at a light or sign. " +
            "Yellow means ease off, orange brake, red brake hard, and it flashes faster the more braking is missing. " +
-           "It stays dark while the car is already slowing enough, and pulses green when it is time to go."),
+           "It stays dark while the car is already slowing enough, and pulses green when it is time to go. " +
+           "Along the bottom, four lights read like a runway PAPI whenever there is something to slow for: two white and two " +
+           "red is on profile, more red means brake more (all red flashes), more white means ease off."),
       ),
       "HardBrakeFlash": (
         lambda: tr("Hard Brake Warning"),

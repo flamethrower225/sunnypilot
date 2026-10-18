@@ -10,6 +10,17 @@ Each frame it works out the deceleration needed to settle at the gap the longitu
 deceleration needed to stop just short of a planned stop (a light or sign, from the stop detector). The larger of the two, minus
 the deceleration the car already has, is the shortfall. No shortfall, no border. As it grows the glow turns yellow, then orange,
 then red, flashes faster and reaches further into the screen. When stopped and it is time to go, the edge pulses green.
+
+Along the bottom edge sits a PAPI, like the row of four lights beside a runway that shows a pilot the glide path. Here the glide
+path is the braking needed, and the lights compare it with the braking the car has, whenever there is something to slow for:
+
+  red red red red (flashing)  far too little braking: brake hard
+  white red red red           too little
+  white white red red         on profile
+  white white white red       more than needed: ease off
+  white white white white     far more than needed: stopping well short
+
+As on a runway, more red means less margin. The glow is the alarm; the PAPI is the precise reading, and shows even on profile.
 """
 import math
 import time
@@ -17,7 +28,7 @@ import time
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import ZONE_RGB, rgba, roundness
+from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, ZONE_RGB, rgba, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import STOP_DISTANCE, GapZone, get_t_follow
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.detection import StopPhase, get_detection_feed
 from openpilot.selfdrive.ui.sunnypilot.onroad.overlays.follow_ghost import desired_gap
@@ -42,6 +53,20 @@ GO_HZ, GO_DEPTH, GO_ALPHA, GO_TIME = 1.0, 90.0, 0.55, 2.5
 RISE_RC, FALL_RC = 0.08, 0.45  # s: react fast, calm down slowly so it doesn't flicker
 EDGE_LAYERS = 14
 EDGE_RADIUS = 36.0
+
+SHOW_DEMAND = 0.6          # m/s^2 of needed braking before the PAPI comes on (something to slow for)
+HIDE_DEMAND = 0.3          # and below this it goes off again
+RED_THRESHOLDS = (-1.5, -0.5, 0.5, 1.5)  # deviation (needed minus actual braking, m/s^2) at which each red light comes on
+HYSTERESIS = 0.15          # m/s^2, a light changes only once the deviation is this far past its threshold
+DEMAND_RC, DECEL_RC, PAPI_FADE_RC = 0.15, 0.25, 0.2  # s
+
+PAPI_WIDTH = 0.56          # share of the screen width the row of lights spans
+PAPI_GAP = 36.0            # px between lights
+PAPI_CORE_H = 16.0         # px, the bright bar at the bottom edge
+PAPI_BOTTOM = 10.0         # px from the bottom edge
+PAPI_HALO_H = 120.0        # px the light's glow reaches up into the picture
+PAPI_RED = (255, 58, 52)
+PAPI_WHITE = (255, 250, 240)
 
 YELLOW, ORANGE, RED, GREEN = (ZONE_RGB[z] for z in (GapZone.CAUTION, GapZone.CLOSE, GapZone.CRITICAL, GapZone.GOOD))
 
@@ -87,11 +112,33 @@ def lerp(pair: tuple[float, float], t: float) -> float:
   return pair[0] + (pair[1] - pair[0]) * t
 
 
+def red_lights(deviation: float, previous: int = 2) -> int:
+  """How many of the four PAPI lights are red for a deviation (needed minus actual braking). Each threshold has hysteresis, so a
+  deviation sitting on a boundary doesn't make a light flicker."""
+  count = sum(deviation >= t for t in RED_THRESHOLDS)
+  if count > previous and deviation < RED_THRESHOLDS[count - 1] + HYSTERESIS:
+    count -= 1
+  elif count < previous and deviation > RED_THRESHOLDS[count] - HYSTERESIS:
+    count += 1
+  return count
+
+
+def light_colors(reds: int) -> list[tuple]:
+  """Left to right, white lights first, as a PAPI reads from the approach."""
+  return [PAPI_WHITE] * (4 - reds) + [PAPI_RED] * reds
+
+
 # *** the overlay ***
 
 class PaceBorder:
   def __init__(self):
-    self._urgency = FirstOrderFilter(0.0, FALL_RC, 1 / gui_app.target_fps)
+    dt = 1 / gui_app.target_fps
+    self._urgency = FirstOrderFilter(0.0, FALL_RC, dt)
+    self._demand_f = FirstOrderFilter(0.0, DEMAND_RC, dt)
+    self._decel_f = FirstOrderFilter(0.0, DECEL_RC, dt)
+    self._papi_alpha = FirstOrderFilter(0.0, PAPI_FADE_RC, dt)
+    self.papi_shown = False
+    self.reds = 2
     self._phase = 0.0
     self._last = time.monotonic()
     self._go_until = 0.0
@@ -122,6 +169,8 @@ class PaceBorder:
     dt, self._last = min(now - self._last, 0.2), now
     if not ui_state.pace_border or not ui_state.started:
       self._urgency.x = 0.0
+      self._papi_alpha.x = 0.0
+      self.papi_shown = False
       self._go_until = 0.0
       return
     update_feed()
@@ -131,6 +180,13 @@ class PaceBorder:
     self._urgency.update_alpha(RISE_RC if target > self._urgency.x else FALL_RC)
     self._urgency.update(target)
     self._phase = (self._phase + lerp(FLASH_HZ, self._urgency.x) * dt) % 1.0  # integrate so a changing rate never jumps
+
+    # PAPI: smoothed needed vs actual braking, shown while there is something to slow for
+    self._demand_f.update(demand)
+    self._decel_f.update(decel)
+    self.papi_shown = self._demand_f.x >= (HIDE_DEMAND if self.papi_shown else SHOW_DEMAND)
+    self.reds = red_lights(self._demand_f.x - self._decel_f.x, self.reds) if self.papi_shown else 2
+    self._papi_alpha.update(1.0 if self.papi_shown else 0.0)
 
     stop = get_detection_feed().stop
     e2e = ui_state.sm['longitudinalPlanSP'].e2eAlerts
@@ -147,13 +203,34 @@ class PaceBorder:
     if not ui_state.pace_border:
       return
     u = self._urgency.x
+    beat = 0.5 - 0.5 * math.cos(2 * math.pi * self._phase)
     if u > 0.02:
-      beat = 0.5 - 0.5 * math.cos(2 * math.pi * self._phase)
       strength = lerp(FLASH_FLOOR, u) + (1 - lerp(FLASH_FLOOR, u)) * beat
       draw_edge_glow(rect, urgency_color(u), lerp(DEPTH_PX, u), lerp(PEAK_ALPHA, u) * strength * min(u * 4, 1.0))
     elif time.monotonic() < self._go_until:
-      beat = 0.5 - 0.5 * math.cos(2 * math.pi * GO_HZ * time.monotonic())
-      draw_edge_glow(rect, GREEN, GO_DEPTH, GO_ALPHA * (0.3 + 0.7 * beat))
+      go_beat = 0.5 - 0.5 * math.cos(2 * math.pi * GO_HZ * time.monotonic())
+      draw_edge_glow(rect, GREEN, GO_DEPTH, GO_ALPHA * (0.3 + 0.7 * go_beat))
+    papi = self._papi_alpha.x
+    if papi > 0.01:
+      if self.reds == 4:  # all red flashes in step with the glow
+        papi *= 0.25 + 0.75 * beat
+      draw_papi(rect, light_colors(self.reds), papi)
+
+
+def draw_papi(rect: rl.Rectangle, colors: list[tuple], alpha: float) -> None:
+  """A row of four lights centered on the bottom edge: a bright bar at the edge whose glow fades up into the picture."""
+  total = rect.width * PAPI_WIDTH
+  w = (total - PAPI_GAP * (len(colors) - 1)) / len(colors)
+  x = rect.x + (rect.width - total) / 2
+  core_y = rect.y + rect.height - PAPI_BOTTOM - PAPI_CORE_H
+  for rgb in colors:
+    halo_top = core_y + PAPI_CORE_H / 2 - PAPI_HALO_H
+    rl.draw_rectangle_gradient_v(int(x), int(halo_top), int(w), int(PAPI_HALO_H), rgba(rgb, 0.0), rgba(rgb, 0.55 * alpha))
+    # dark housing, so the lights stand out even inside a red or orange edge glow
+    rl.draw_rectangle_rounded(rl.Rectangle(x - 10, core_y - 10, w + 20, PAPI_CORE_H + 20), 1.0, 12, rgba(BLACK, 0.6 * alpha))
+    rl.draw_rectangle_rounded(rl.Rectangle(x - 6, core_y - 6, w + 12, PAPI_CORE_H + 12), 1.0, 12, rgba(rgb, 0.35 * alpha))
+    rl.draw_rectangle_rounded(rl.Rectangle(x, core_y, w, PAPI_CORE_H), 1.0, 12, rgba(rgb, alpha))
+    x += w + PAPI_GAP
 
 
 def draw_edge_glow(rect: rl.Rectangle, rgb: tuple, depth: float, alpha: float) -> None:
