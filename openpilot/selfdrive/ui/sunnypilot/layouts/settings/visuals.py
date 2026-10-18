@@ -172,6 +172,12 @@ class VisualsLayout(Widget):
         lambda: tr("Disengage Risk Meter"),
         tr("Show the driving model's predicted chance of a disengagement over the next 2 to 10 seconds, under the speed."),
       ),
+      "PaceBorder": (
+        lambda: tr("Pace Border"),
+        tr("Glow the screen edges when you are not slowing enough for the car ahead or for a planned stop at a light or sign. " +
+           "Yellow means ease off, orange brake, red brake hard, and it flashes faster the more braking is missing. " +
+           "It stays dark while the car is already slowing enough, and pulses green when it is time to go."),
+      ),
       "HardBrakeFlash": (
         lambda: tr("Hard Brake Warning"),
         tr("Flash the screen edges when the driving model predicts hard braking ahead."),
