@@ -18,6 +18,7 @@ from openpilot.system.ui.widgets import DialogResult
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
 from openpilot.system.ui.widgets.list_view import button_item
 
+from openpilot.selfdrive.ui.sunnypilot.comm_issue_watch import comm_issues_html
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.dash_research import DashResearchItems
 from openpilot.system.ui.sunnypilot.widgets.html_render import HtmlModalSP
 from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp
@@ -53,10 +54,13 @@ class DeveloperLayoutSP(DeveloperLayout):
 
     self.error_log_btn = button_item(tr("Error Log"), tr("VIEW"), tr("View the error log for sunnypilot crashes."), callback=self._on_error_log_clicked)
 
+    self.comm_issue_btn = button_item(tr("Communication Issue Log"), tr("VIEW"),
+                                      tr("The last communication issue alerts: which processes were late, how slow they were, and what " +
+                                         "the device and UI were doing at that moment."), callback=self._on_comm_issue_clicked)
     self.dash_research = DashResearchItems()
 
     self.items: list = [self.show_advanced_controls, self.enable_github_runner_toggle, self.enable_copyparty_toggle, self.prebuilt_toggle, self.error_log_btn,
-                        *self.dash_research.items]
+                        self.comm_issue_btn, *self.dash_research.items]
 
   @staticmethod
   def _on_prebuilt_toggled(state):
@@ -75,6 +79,11 @@ class DeveloperLayoutSP(DeveloperLayout):
     if result == DialogResult.CONFIRM and log_exists:
       dialog2 = ConfirmDialog(tr("Would you like to delete this log?"), tr("Yes"), tr("No"), rich=False, callback=self._on_delete_confirm)
       gui_app.push_widget(dialog2)
+
+  @staticmethod
+  def _on_comm_issue_clicked():
+    text = comm_issues_html(ui_state.params.get("CommIssueLog"), ui_state.params.get("CommIssueUiLog"))
+    gui_app.push_widget(HtmlModalSP(text=text))
 
   def _on_error_log_clicked(self):
     text = ""

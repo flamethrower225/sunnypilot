@@ -12,6 +12,7 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.display import OnroadBrightness
 from openpilot.sunnypilot.models.helpers import ACTIVE_BUNDLE_KEYS, get_active_source
 from openpilot.sunnypilot.sunnylink.sunnylink_state import SunnylinkState
+from openpilot.selfdrive.ui.sunnypilot.comm_issue_watch import CommIssueWatch
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.sunnypilot.widgets.screen_saver import ScreenSaverSP
 
@@ -78,8 +79,10 @@ class UIStateSP:
     self.custom_torque_params: bool = False
     self.torque_override_enabled: bool = False
     self._sp_initialized: bool = False
+    self.comm_issue_watch = CommIssueWatch()
 
   def update(self) -> None:
+    self.comm_issue_watch.update(self)
     if self.sunnylink_enabled:
       self.sunnylink_state.start()
     else:
