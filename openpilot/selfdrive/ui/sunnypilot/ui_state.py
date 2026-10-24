@@ -58,6 +58,7 @@ class UIStateSP:
     self.driver_flags: bool = False
     self.follow_ghost: bool = False
     self.hard_brake_flash: bool = False
+    self.harness_check: bool = False
     self.pace_border: bool = False
     self.drive_notifications: bool = False
     self.scene_detection: bool = False
