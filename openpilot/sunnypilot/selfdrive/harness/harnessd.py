@@ -18,7 +18,7 @@ from opendbc.car.structs import car
 from openpilot.cereal import messaging
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
-from openpilot.sunnypilot.selfdrive.harness.harness_check import PROVISIONAL_PERIOD_S, HarnessTally, classify, decision_from, is_final
+from openpilot.sunnypilot.selfdrive.harness.harness_check import HarnessSession, Stamp, boot_id, decision_from
 
 IDLE_S = 1.0
 
@@ -34,34 +34,31 @@ def read_decision(params: Params) -> dict:
 
 def main() -> None:
   params = Params()
-  tally = HarnessTally()
+  boot = boot_id()
+  session = HarnessSession()
   sock = messaging.sub_sock("can", timeout=100)
-  last_write = 0.0
-  verdict = ""
   cloudlog.info("harnessd: listening")
 
-  while True:
+  while not session.final:
     for msg in messaging.drain_sock(sock, wait_for_one=True):
       for c in msg.can:
-        tally.ingest(msg.logMonoTime, c.src, c.address, len(c.dat))
+        session.tally.ingest(msg.logMonoTime, c.src, c.address, len(c.dat))
 
-    seconds = tally.seconds
-    if seconds - last_write < PROVISIONAL_PERIOD_S:
+    if not session.due():
       continue
-    last_write = seconds
     try:
-      result = classify(tally, read_decision(params), time.time())
-      result["final"] = is_final(seconds, result["verdict"])
+      stamp = Stamp(time.time(), time.monotonic(), boot)  # noqa: TID251  wall clock is only shown as the date of the check
+      result = session.result(read_decision(params), stamp)
       params.put("HarnessCheck", result)
     except Exception:
       cloudlog.exception("harnessd: check failed")
       continue
-    verdict = result["verdict"]
-    if result["final"]:
-      break
+    session.finish(result)
+    if session.changed:
+      cloudlog.info(f"harnessd: {result['verdict']} after {result['seconds']} s, camera bus {result['camera_bus']}: {result['title']}")
 
   del sock
-  cloudlog.info(f"harnessd: done after {tally.seconds:.1f} s, {verdict}")
+  cloudlog.info(f"harnessd: done after {session.tally.seconds:.1f} s, {session.verdict}")
   while True:
     time.sleep(IDLE_S)
 

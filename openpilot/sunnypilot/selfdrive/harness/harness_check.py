@@ -13,6 +13,7 @@ another bus, that test silently fails, the car is set up as non-HDA2 and openpil
 Pure Python with no openpilot runtime imports, so it can be tested anywhere. harnessd feeds it the 'can' stream.
 """
 from enum import StrEnum
+from typing import NamedTuple
 
 LKAS, LKAS_ALT, LFA, LFA_ALT = 0x50, 0x110, 0x12A, 0xCB
 HDA2_MSGS = {LKAS: "LKAS", LKAS_ALT: "LKAS_ALT"}
@@ -28,8 +29,25 @@ PROVISIONAL_PERIOD_S = 2.0
 FINAL_S = 15.0
 GIVE_UP_S = 60.0
 
-SWAP_ACTION = ("Flip the CAN pairs on the comma harness using the wiring diagram for your trim, then turn the car on again: "
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+
+SWAP_ACTION = ("Flip the CAN pairs on the comma harness using the wiring diagram for your trim, then turn the car on again: " +
                "the steering messages must arrive on bus {cam}.")
+
+
+class Stamp(NamedTuple):
+  """When a result was written. mono and boot decide whether it belongs to this drive; t is only shown as a date."""
+  t: float      # wall clock: can jump when the clock syncs, so never compared
+  mono: float   # time.monotonic(): the same clock in every process, but it restarts at every boot
+  boot: str     # kernel boot id, so a result from before a reboot never passes for this drive
+
+
+def boot_id() -> str:
+  try:
+    with open(BOOT_ID_PATH) as f:
+      return f.read().strip()
+  except OSError:
+    return ""
 
 
 class Verdict(StrEnum):
@@ -44,10 +62,12 @@ ALERT_VERDICTS = (Verdict.SWAP_NEEDED, Verdict.SWAP_LIKELY)
 
 
 class HarnessTally:
-  """Frames per (bus, address) from the car, plus the longest frame and the CAN time span. One dict update per frame."""
+  """Frames per (bus, address) from the car with when each was first and last seen, the longest frame, and the CAN time span."""
 
-  def __init__(self):
+  def __init__(self) -> None:
     self.counts: dict[tuple[int, int], int] = {}
+    self.first_seen: dict[tuple[int, int], int] = {}
+    self.last_seen: dict[tuple[int, int], int] = {}
     self.max_len = 0
     self.first_ns: int | None = None
     self.last_ns = 0
@@ -59,13 +79,22 @@ class HarnessTally:
       self.first_ns = t_ns
     self.last_ns = t_ns
     key = (src, address)
-    self.counts[key] = self.counts.get(key, 0) + 1
+    n = self.counts.get(key, 0)
+    if n == 0:
+      self.first_seen[key] = t_ns
+    self.counts[key] = n + 1
+    self.last_seen[key] = t_ns
     if length > self.max_len:
       self.max_len = length
 
   @property
   def seconds(self) -> float:
     return 0.0 if self.first_ns is None else (self.last_ns - self.first_ns) / 1e9
+
+  def hz(self, key: tuple[int, int]) -> float:
+    """A message's rate over its own time span, so one that started late (the camera boots after the car) still reads true."""
+    span = (self.last_seen.get(key, 0) - self.first_seen.get(key, 0)) / 1e9
+    return round((self.counts.get(key, 0) - 1) / span, 1) if span > 0 else 0.0
 
 
 def camera_bus(buses) -> int:
@@ -113,15 +142,15 @@ def _verdict(tally: HarnessTally, cam: int, seen: dict[int, list[int]]) -> tuple
   hda2_buses, hda2_names = elsewhere(HDA2_MSGS)
   if hda2_buses:
     return (Verdict.SWAP_NEEDED, f"Pin swap needed: steering on {bus_list(hda2_buses)}",
-            f"{name_list(hda2_names)} (HDA2 steering) arrive on {bus_list(hda2_buses)}, not on bus {cam}. "
+            f"{name_list(hda2_names)} (HDA2 steering) arrive on {bus_list(hda2_buses)}, not on bus {cam}. " +
             "openpilot will set the car up as non-HDA2 and cannot steer it.",
             SWAP_ACTION.format(cam=cam))
   lfa_cam = on_cam(NON_HDA2_MSGS)
   if lfa_cam:
     return (Verdict.NON_HDA2, "Non-HDA2 wiring",
-            f"{name_list(lfa_cam)} arrive on bus {cam} and no HDA2 steering messages were seen, so openpilot sets the car up "
+            f"{name_list(lfa_cam)} arrive on bus {cam} and no HDA2 steering messages were seen, so openpilot sets the car up " +
             "as non-HDA2 (LFA steering).",
-            "Correct for a non-HDA2 car. If this car has Highway Driving Assist II, the harness is not passing the HDA2 "
+            "Correct for a non-HDA2 car. If this car has Highway Driving Assist II, the harness is not passing the HDA2 " +
             "messages: check the harness type and pinout.")
   lfa_buses, lfa_names = elsewhere(NON_HDA2_MSGS)
   if lfa_buses:
@@ -130,7 +159,7 @@ def _verdict(tally: HarnessTally, cam: int, seen: dict[int, list[int]]) -> tuple
             SWAP_ACTION.format(cam=cam))
   return (Verdict.INCONCLUSIVE, "No steering messages yet",
           f"None of LKAS, LKAS_ALT, LFA or LFA_ALT arrived on any bus in {tally.seconds:.0f} s.",
-          "Make sure the car is fully on (ready to drive, not just accessory) and give the camera a few seconds to start; "
+          "Make sure the car is fully on (ready to drive, not just accessory) and give the camera a few seconds to start; " +
           "the check keeps listening for a minute.")
 
 
@@ -139,7 +168,7 @@ def _disagrees(verdict: Verdict, decision: dict) -> bool:
   return expected is not None and decision["hda2"] is not None and decision["hda2"] != expected
 
 
-def classify(tally: HarnessTally, decision: dict | None, now: float) -> dict:
+def classify(tally: HarnessTally, decision: dict | None, stamp: Stamp) -> dict:
   """The HarnessCheck param: the verdict in words, the camera bus, and what arrived on each bus. final is set by harnessd."""
   decision = decision or decision_from("", "", False)
   buses = sorted({bus for bus, _ in tally.counts})
@@ -147,27 +176,66 @@ def classify(tally: HarnessTally, decision: dict | None, now: float) -> dict:
   seen = {addr: sorted(bus for (bus, a), n in tally.counts.items() if a == addr and n >= MIN_FRAMES) for addr in STEERING_MSGS}
   verdict, title, detail, action = _verdict(tally, cam, seen)
 
-  seconds = tally.seconds
   breakdown = []
   for bus in buses:
     on_bus = {a: n for (b, a), n in tally.counts.items() if b == bus}
-    steering = {name: {"frames": on_bus[addr], "hz": round(on_bus[addr] / seconds, 1) if seconds > 0 else 0.0}
+    steering = {name: {"frames": on_bus[addr], "hz": tally.hz((bus, addr))}
                 for addr, name in STEERING_MSGS.items() if on_bus.get(addr, 0) >= MIN_FRAMES}
     breakdown.append({"bus": bus, "frames": sum(on_bus.values()), "ids": len(on_bus), "steering": steering})
 
   return {"verdict": str(verdict), "title": title, "detail": detail, "action": action, "camera_bus": cam,
-          "can_fd": tally.max_len > CLASSIC_CAN_MAX_LEN, "seconds": round(seconds, 1), "t": now, "buses": breakdown,
-          "decision": decision, "disagrees": _disagrees(verdict, decision), "final": False}
+          "can_fd": tally.max_len > CLASSIC_CAN_MAX_LEN, "seconds": round(tally.seconds, 1), "t": stamp.t, "mono": stamp.mono,
+          "boot": stamp.boot, "buses": breakdown, "decision": decision, "disagrees": _disagrees(verdict, decision), "final": False}
 
 
 def is_final(seconds: float, verdict: str) -> bool:
   return seconds >= GIVE_UP_S or (seconds >= FINAL_S and verdict != Verdict.INCONCLUSIVE)
 
 
-def alert_text(result: dict | None, drive_start: float) -> str | None:
-  """The onroad alert's title, or None: only a pin-swap result written during this drive raises it."""
-  if not result or result.get("verdict") not in ALERT_VERDICTS or "title" not in result:
+class HarnessSession:
+  """When harnessd writes HarnessCheck: every PROVISIONAL_PERIOD_S of CAN time until a final result has been written.
+
+  finish() is called only after the write succeeded, so a failed params write is simply retried a period later.
+  """
+
+  def __init__(self) -> None:
+    self.tally = HarnessTally()
+    self.final = False
+    self.verdict = ""
+    self.changed = False
+    self._last_write = 0.0
+
+  def due(self) -> bool:
+    return not self.final and self.tally.seconds - self._last_write >= PROVISIONAL_PERIOD_S
+
+  def result(self, decision: dict | None, stamp: Stamp) -> dict:
+    self._last_write = self.tally.seconds
+    r = classify(self.tally, decision, stamp)
+    r["final"] = is_final(self.tally.seconds, r["verdict"])
+    self.changed = r["verdict"] != self.verdict
+    self.verdict = r["verdict"]
+    return r
+
+  def finish(self, result: dict) -> None:
+    self.final = bool(result.get("final"))
+
+
+def _this_drive_final(result: dict | None, drive_start: float, boot: str) -> bool:
+  """drive_start is time.monotonic() when the drive began, on the boot named by boot."""
+  if not result or not result.get("final"):
+    return False
+  return result.get("boot") == boot and result.get("mono", -1.0) >= drive_start
+
+
+def settled(result: dict | None, drive_start: float, boot: str) -> bool:
+  """This drive's check is over, whatever it found: the alert can stop reading HarnessCheck."""
+  return _this_drive_final(result, drive_start, boot)
+
+
+def alert_text(result: dict | None, drive_start: float, boot: str) -> str | None:
+  """The onroad alert's title, or None. Only a final pin-swap result written during this drive raises it: in the first seconds
+  the ADAS ECU's LFA can show up before the camera's LKAS, so a provisional verdict is not worth an alarm."""
+  if result is None or not _this_drive_final(result, drive_start, boot) or result.get("verdict") not in ALERT_VERDICTS:
     return None
-  if result.get("t", 0.0) < drive_start:
-    return None
-  return result["title"]
+  title = result.get("title")
+  return str(title) if title else None

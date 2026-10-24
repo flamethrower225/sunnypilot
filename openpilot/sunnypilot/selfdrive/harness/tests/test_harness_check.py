@@ -8,12 +8,15 @@ import json
 
 import pytest
 
-from openpilot.sunnypilot.selfdrive.harness.harness_check import (FINAL_S, GIVE_UP_S, LFA, LFA_ALT, LKAS, LKAS_ALT, MIN_FRAMES, HarnessTally,
-                                                                   Verdict, alert_text, classify, decision_from, is_final)
+from openpilot.sunnypilot.selfdrive.harness.harness_check import (FINAL_S, GIVE_UP_S, LFA, LFA_ALT, LKAS, LKAS_ALT, MIN_FRAMES, HarnessSession,
+                                                                   HarnessTally, Stamp, Verdict, alert_text, boot_id, classify, decision_from,
+                                                                   is_final, settled)
 
 OTHER = 0x1A0          # some ordinary car message
 FD_LEN, CLASSIC_LEN = 32, 8
 NOW = 1_800_000_000.0
+MONO, BOOT = 500.0, "boot-a"
+STAMP = Stamp(NOW, MONO, BOOT)
 HDA2_CAR = decision_from("KIA_SPORTAGE_HEV_2026", "hyundai", True)
 NON_HDA2_CAR = decision_from("HYUNDAI_TUCSON_2025", "hyundai", False)
 
@@ -30,7 +33,7 @@ def car_traffic(tally: HarnessTally, buses=(0, 1, 2)) -> None:
 
 
 def check(tally: HarnessTally, decision=None) -> dict:
-  return classify(tally, decision, NOW)
+  return classify(tally, decision, STAMP)
 
 
 class TestVerdicts:
@@ -168,8 +171,16 @@ class TestCounting:
     bus2 = next(b for b in r["buses"] if b["bus"] == 2)
     assert bus2["frames"] == 200 and bus2["ids"] == 2
     assert bus2["steering"]["LKAS"]["frames"] == 100
-    assert bus2["steering"]["LKAS"]["hz"] == pytest.approx(100 / t.seconds, rel=0.01)
+    assert bus2["steering"]["LKAS"]["hz"] == pytest.approx(100.0, rel=0.01)
     assert next(b for b in r["buses"] if b["bus"] == 0)["steering"] == {}
+
+  def test_rate_uses_the_messages_own_time_span(self):
+    # the camera starts sending 10 s into the check: its rate must still read 100 Hz, not a third of that
+    t = HarnessTally()
+    feed(t, 0, OTHER, 1501, hz=100.0)
+    feed(t, 2, LKAS, 500, hz=100.0, start_s=10.0)
+    lkas = next(b for b in check(t)["buses"] if b["bus"] == 2)["steering"]["LKAS"]
+    assert lkas["hz"] == pytest.approx(100.0, rel=0.01)
 
 
 class TestDecision:
@@ -213,28 +224,90 @@ class TestTiming:
 
 
 class TestAlert:
-  def _result(self, verdict, t=NOW):
-    return {"verdict": str(verdict), "title": "Pin swap needed: steering on bus 0", "t": t}
+  DRIVE_START = MONO - 5
+
+  def _result(self, verdict, mono=MONO, boot=BOOT, final=True):
+    return {"verdict": str(verdict), "title": "Pin swap needed: steering on bus 0", "t": NOW, "mono": mono, "boot": boot, "final": final}
 
   def test_swap_verdicts_alert(self):
-    assert alert_text(self._result(Verdict.SWAP_NEEDED), NOW - 5) == "Pin swap needed: steering on bus 0"
-    assert alert_text(self._result(Verdict.SWAP_LIKELY), NOW - 5) is not None
+    assert alert_text(self._result(Verdict.SWAP_NEEDED), self.DRIVE_START, BOOT) == "Pin swap needed: steering on bus 0"
+    assert alert_text(self._result(Verdict.SWAP_LIKELY), self.DRIVE_START, BOOT) is not None
 
   def test_other_verdicts_do_not_alert(self):
     for v in (Verdict.OK_HDA2, Verdict.NON_HDA2, Verdict.INCONCLUSIVE):
-      assert alert_text(self._result(v), NOW - 5) is None
+      assert alert_text(self._result(v), self.DRIVE_START, BOOT) is None
+
+  def test_a_provisional_swap_does_not_alert(self):
+    # LFA from the ADAS ECU can show up before the camera's LKAS in the first seconds: only the settled verdict may alarm
+    assert alert_text(self._result(Verdict.SWAP_LIKELY, final=False), self.DRIVE_START, BOOT) is None
 
   def test_a_result_from_an_earlier_drive_does_not_alert(self):
-    assert alert_text(self._result(Verdict.SWAP_NEEDED, t=NOW - 3600), NOW - 5) is None
+    assert alert_text(self._result(Verdict.SWAP_NEEDED, mono=100.0), self.DRIVE_START, BOOT) is None
+
+  def test_a_result_from_before_a_reboot_does_not_alert_even_with_a_later_monotonic_time(self):
+    # monotonic time restarts at boot, so an old result can carry a bigger number than this drive's start
+    assert alert_text(self._result(Verdict.SWAP_NEEDED, mono=9_000.0, boot="boot-old"), self.DRIVE_START, BOOT) is None
 
   def test_missing_or_malformed_result(self):
-    assert alert_text(None, NOW) is None
-    assert alert_text({}, NOW) is None
-    assert alert_text({"verdict": "swap_needed"}, NOW) is None
+    assert alert_text(None, self.DRIVE_START, BOOT) is None
+    assert alert_text({}, self.DRIVE_START, BOOT) is None
+    assert alert_text({"verdict": "swap_needed", "final": True}, self.DRIVE_START, BOOT) is None
+
+  def test_settled_once_this_drives_result_is_final(self):
+    assert settled(self._result(Verdict.OK_HDA2), self.DRIVE_START, BOOT)
+    assert not settled(self._result(Verdict.OK_HDA2, final=False), self.DRIVE_START, BOOT)
+    assert not settled(self._result(Verdict.OK_HDA2, mono=100.0), self.DRIVE_START, BOOT)
+    assert not settled(None, self.DRIVE_START, BOOT) and not settled({}, self.DRIVE_START, BOOT)
+
+  def test_boot_id_is_a_string(self):
+    assert isinstance(boot_id(), str)   # "" where the kernel doesn't provide one (PC, Windows)
+
+
+class TestSession:
+  def test_writes_every_provisional_period_of_can_time(self):
+    s = HarnessSession()
+    feed(s.tally, 2, LKAS, 150, hz=100.0)           # 1.49 s of CAN time
+    assert not s.due()
+    feed(s.tally, 2, LKAS, 60, hz=100.0, start_s=1.5)
+    assert s.due()
+    r = s.result(HDA2_CAR, STAMP)
+    assert r["verdict"] == Verdict.OK_HDA2 and r["final"] is False
+    assert not s.due()                                # nothing new since the write
+
+  def test_final_result_stops_the_session(self):
+    s = HarnessSession()
+    car_traffic(s.tally)
+    feed(s.tally, 2, LKAS, int(FINAL_S * 100) + 1, hz=100.0)
+    r = s.result(HDA2_CAR, STAMP)
+    assert r["final"] is True
+    s.finish(r)
+    assert s.final and not s.due()
+
+  def test_a_failed_write_is_retried_next_period(self):
+    s = HarnessSession()
+    feed(s.tally, 2, LKAS, int(FINAL_S * 100) + 1, hz=100.0)
+    r = s.result(HDA2_CAR, STAMP)                       # params.put failed, so finish() is never called
+    assert r["final"] and not s.final
+    feed(s.tally, 2, LKAS, 300, hz=100.0, start_s=FINAL_S + 0.1)
+    assert s.due()
+
+  def test_changed_reports_verdict_transitions(self):
+    s = HarnessSession()
+    car_traffic(s.tally)
+    feed(s.tally, 0, LFA, 150, hz=100.0)
+    feed(s.tally, 0, OTHER, 250, hz=100.0)
+    first = s.result(None, STAMP)
+    assert first["verdict"] == Verdict.SWAP_LIKELY and s.changed
+    feed(s.tally, 0, OTHER, 250, hz=100.0, start_s=2.5)
+    s.result(None, STAMP)
+    assert not s.changed
+    feed(s.tally, 2, LKAS, 300, hz=100.0, start_s=5.0)
+    assert s.result(None, STAMP)["verdict"] == Verdict.OK_HDA2 and s.changed
 
 
 class TestResultContract:
-  KEYS = {"verdict", "title", "detail", "action", "camera_bus", "can_fd", "seconds", "t", "buses", "decision", "disagrees", "final"}
+  KEYS = {"verdict", "title", "detail", "action", "camera_bus", "can_fd", "seconds", "t", "mono", "boot", "buses", "decision", "disagrees",
+          "final"}
 
   @pytest.mark.parametrize("setup", ["ok", "swap", "non_hda2", "likely", "nothing", "empty", "classic"])
   def test_every_verdict_has_the_full_shape_and_is_json(self, setup):
@@ -249,6 +322,6 @@ class TestResultContract:
       feed(t, 0, OTHER, 100, length=CLASSIC_LEN)
     r = check(t, HDA2_CAR)
     assert set(r) == self.KEYS
-    assert r["final"] is False and r["t"] == NOW
+    assert r["final"] is False and (r["t"], r["mono"], r["boot"]) == (NOW, MONO, BOOT)
     assert all(isinstance(r[k], str) and r[k] for k in ("title", "detail", "action"))
     assert json.loads(json.dumps(r))["verdict"] == r["verdict"]

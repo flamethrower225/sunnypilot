@@ -12,7 +12,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.common import BLACK, WHITE, ZONE_RGB, rgba, draw_text, roundness
 from openpilot.selfdrive.ui.sunnypilot.onroad.lead_gap_badge.metrics import GapZone
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.sunnypilot.selfdrive.harness.harness_check import alert_text
+from openpilot.sunnypilot.selfdrive.harness.harness_check import alert_text, boot_id, settled
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -34,13 +34,15 @@ class HarnessAlert:
   """Red card when this drive's harness check says the camera's steering messages are on the wrong bus.
 
   Independent of Drive Notifications, so turning those off can't hide a wiring problem; only the Harness Check toggle does.
-  Results are stamped with wall-clock time by harnessd, so a result written before this drive started never raises it.
+  harnessd stamps results with time.monotonic() and the boot id, so a result written before this drive started, or before a
+  reboot, never raises it.
   """
 
   def __init__(self):
     self._font_bold = gui_app.font(FontWeight.BOLD)
     self._font_semi = gui_app.font(FontWeight.SEMI_BOLD)
     self._alpha = FirstOrderFilter(0.0, FADE_RC, 1 / gui_app.target_fps)
+    self._boot = boot_id()
     self._reset()
 
   def _reset(self) -> None:
@@ -48,6 +50,7 @@ class HarnessAlert:
     self._next_read = 0.0
     self._title: str | None = None
     self._shown_at: float | None = None
+    self._settled = False   # this drive's final result is in: no more params reads until the next drive
 
   def update(self) -> None:
     if not ui_state.harness_check or not ui_state.started:
@@ -55,12 +58,14 @@ class HarnessAlert:
       self._alpha.x = 0.0
       return
 
-    now = time.time()
+    now = time.monotonic()
     if self._drive_start is None:
       self._drive_start = now
-    if self._shown_at is None and now >= self._next_read:
+    if not self._settled and now >= self._next_read:
       self._next_read = now + READ_PERIOD_S
-      self._title = alert_text(ui_state.params.get("HarnessCheck"), self._drive_start)
+      result = ui_state.params.get("HarnessCheck")
+      self._settled = settled(result, self._drive_start, self._boot)
+      self._title = alert_text(result, self._drive_start, self._boot)
       if self._title is not None:
         self._shown_at = now
     visible = self._shown_at is not None and now - self._shown_at < SHOW_S

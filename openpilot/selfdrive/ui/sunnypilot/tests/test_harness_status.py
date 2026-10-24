@@ -7,9 +7,10 @@ See the LICENSE.md file in the root directory for more details.
 import pytest
 
 from openpilot.selfdrive.ui.sunnypilot.harness_status import harness_status_html
-from openpilot.sunnypilot.selfdrive.harness.harness_check import LFA, LKAS, HarnessTally, classify, decision_from
+from openpilot.sunnypilot.selfdrive.harness.harness_check import LFA, LKAS, HarnessTally, Stamp, classify, decision_from
 
 NOW = 1_800_000_000.0
+STAMP = Stamp(NOW, 500.0, "boot-a")
 
 
 def result(lkas_bus: int | None = 2, lfa_bus: int | None = None, decision=None, final: bool = True) -> dict:
@@ -21,7 +22,7 @@ def result(lkas_bus: int | None = 2, lfa_bus: int | None = None, decision=None, 
     if bus is not None:
       for i in range(100):
         t.ingest(i * 10_000_000, bus, addr, 32)
-  r = classify(t, decision, NOW)
+  r = classify(t, decision, STAMP)
   r["final"] = final
   return r
 

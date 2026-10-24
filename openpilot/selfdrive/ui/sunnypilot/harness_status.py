@@ -35,7 +35,7 @@ def _bus_line(bus: dict, camera_bus: int | None) -> str:
 
 def harness_status_html(result: dict | None) -> str:
   if not result:
-    return ("<h2>No harness check yet</h2><p>Turn the car on with the comma plugged in; the result shows here about 15 seconds "
+    return ("<h2>No harness check yet</h2><p>Turn the car on with the comma plugged in; the result shows here about 15 seconds " +
             "later.</p>")
   parts = [f"<h2>{_safe(result.get('title', 'Harness check'))}</h2>"]
   if not result.get("final", False):
