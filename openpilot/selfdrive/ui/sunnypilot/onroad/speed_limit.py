@@ -222,10 +222,9 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
   def _draw_pre_active_arrow(self, sign_rect):
     _, txt_icon, icon_alpha, _, _ = SpeedLimitAlertRenderer.speed_limit_pre_active_icon_helper(self)
     if icon_alpha > 0 and txt_icon != self.arrow_blank:
-      sign_margin = 12
-      arrow_spacing = int(sign_margin * 1.4)
-      arrow_x = sign_rect.x + sign_rect.width + arrow_spacing
-      arrow_y = sign_rect.y + (sign_rect.height - txt_icon.height) / 2
+      # under the sign, where the ahead info sits when not waiting for confirmation; right of it is the stop card column
+      arrow_x = sign_rect.x + (sign_rect.width - txt_icon.width) / 2
+      arrow_y = sign_rect.y + sign_rect.height + 18
       color = rl.Color(255, 255, 255, int(icon_alpha))
       rl.draw_texture_ex(txt_icon, rl.Vector2(arrow_x, arrow_y), 0.0, 1.0, color)
 

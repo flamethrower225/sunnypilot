@@ -12,6 +12,7 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.display import OnroadBrightness
 from openpilot.sunnypilot.models.helpers import ACTIVE_BUNDLE_KEYS, get_active_source
 from openpilot.sunnypilot.sunnylink.sunnylink_state import SunnylinkState
+from openpilot.selfdrive.ui.sunnypilot.comm_issue_watch import CommIssueWatch
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.sunnypilot.widgets.screen_saver import ScreenSaverSP
 
@@ -35,7 +36,8 @@ class UIStateSP:
     self.is_sp_release: bool = self.params.get_bool("IsReleaseSpBranch")
     self.sm_services_ext = [
       "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP",
-      "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay"
+      "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay", "radarTracks",
+      "peripheralState", "sceneDetectionSP"
     ]
 
     self.sunnylink_state = SunnylinkState()
@@ -50,6 +52,22 @@ class UIStateSP:
     self.custom_interactive_timeout: int = 0
     self.developer_ui = None
     self.hide_v_ego_ui: bool = False
+    self.lead_gap_badge: int = 0
+    self.curve_hologram: bool = False
+    self.disengage_horizon: bool = False
+    self.driver_flags: bool = False
+    self.follow_ghost: bool = False
+    self.hard_brake_flash: bool = False
+    self.pace_border: bool = False
+    self.drive_notifications: bool = False
+    self.scene_detection: bool = False
+    self.lead_braking_wake: bool = False
+    self.lead_gap_history: bool = False
+    self.radar_scope: bool = False
+    self.radar_track_brackets: bool = False
+    self.threat_board: bool = False
+    self.stop_detection: bool = False
+    self.detection_log: bool = False
     self.onroad_brightness: int = 0
     self.onroad_brightness_timer: int = 0
     self.onroad_brightness_timer_param: int = 0
@@ -64,8 +82,10 @@ class UIStateSP:
     self.custom_torque_params: bool = False
     self.torque_override_enabled: bool = False
     self._sp_initialized: bool = False
+    self.comm_issue_watch = CommIssueWatch()
 
   def update(self) -> None:
+    self.comm_issue_watch.update(self)
     if self.sunnylink_enabled:
       self.sunnylink_state.start()
     else:
@@ -164,6 +184,22 @@ class UIStateSP:
     self.custom_interactive_timeout = self.params.get("InteractivityTimeout", return_default=True)
     self.developer_ui = self.params.get("DevUIInfo")
     self.hide_v_ego_ui = self.params.get_bool("HideVEgoUI")
+    self.lead_gap_badge = self.params.get("LeadGapBadge", return_default=True)
+    self.curve_hologram = self.params.get_bool("CurveHologram")
+    self.disengage_horizon = self.params.get_bool("DisengageHorizon")
+    self.driver_flags = self.params.get_bool("DriverFlags")
+    self.follow_ghost = self.params.get_bool("FollowGhost")
+    self.hard_brake_flash = self.params.get_bool("HardBrakeFlash")
+    self.pace_border = self.params.get_bool("PaceBorder")
+    self.drive_notifications = self.params.get_bool("DriveNotifications")
+    self.scene_detection = self.params.get_bool("SceneDetection")
+    self.lead_braking_wake = self.params.get_bool("LeadBrakingWake")
+    self.lead_gap_history = self.params.get_bool("LeadGapHistory")
+    self.radar_scope = self.params.get_bool("RadarScope")
+    self.radar_track_brackets = self.params.get_bool("RadarTrackBrackets")
+    self.threat_board = self.params.get_bool("ThreatBoard")
+    self.stop_detection = self.params.get_bool("StopDetection")
+    self.detection_log = self.params.get_bool("DetectionLog")
     self.onroad_brightness = int(float(self.params.get("OnroadScreenOffBrightness", return_default=True)))
     self.onroad_brightness_timer_param = self.params.get("OnroadScreenOffTimer", return_default=True)
     self.rainbow_path = self.params.get_bool("RainbowMode")

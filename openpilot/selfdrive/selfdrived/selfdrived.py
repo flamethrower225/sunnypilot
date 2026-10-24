@@ -32,6 +32,7 @@ from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
 from openpilot.sunnypilot.selfdrive.car.cruise_helpers import CruiseHelper
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import IntelligentCruiseButtonManagement
 from openpilot.sunnypilot.selfdrive.selfdrived.button_state_tracker import ButtonStateTracker
+from openpilot.sunnypilot.selfdrive.selfdrived.comm_issue_log import CommIssueLog
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
 REPLAY = "REPLAY" in os.environ
@@ -140,6 +141,7 @@ class SelfdriveD(CruiseHelper):
     self.last_functional_fan_frame = 0
     self.events_prev = []
     self.logged_comm_issue = None
+    self.comm_issue_log = CommIssueLog(self.params)
     self.not_running_prev = None
     self.experimental_mode = False
     self.personality = get_sanitize_int_param(
@@ -448,6 +450,7 @@ class SelfdriveD(CruiseHelper):
       }
       if logs != self.logged_comm_issue:
         cloudlog.event("commIssue", error=True, **logs)
+        self.comm_issue_log.record(self.sm, logs)
         self.logged_comm_issue = logs
     else:
       self.logged_comm_issue = None

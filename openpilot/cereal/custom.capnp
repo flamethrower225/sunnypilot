@@ -470,7 +470,79 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+# camera object detection (sunnypilot/selfdrive/scened): the traffic light state for our lane and the vehicles around us
+struct SceneDetectionSP @0xcb9fd56c7057593a {
+  frameId @0 :UInt32;              # road camera frame of the latest pass
+  passName @1 :Text;               # which camera region the latest pass looked at
+  executionTime @2 :Float32;       # s for the latest pass, frame in to message out
+  passRate @3 :Float32;            # passes per second right now, after throttling
+  throttled @4 :Bool;              # running slower because the driving model is dropping frames or the device is hot
+  compiled @5 :Bool;               # running the program the build compiled (false: straight from the ONNX file, slow)
+
+  trafficLight @6 :TrafficLight;
+  vehicles @7 :List(Vehicle);
+  stopSign @8 :StopSign;
+  people @9 :List(Vehicle);        # pedestrians and cyclists, kind pedestrian or cyclist
+  rangeScale @10 :Float32;         # road camera distances are scaled by this, learned from the radar lead (1 until it has one)
+  rangeScaleWide @11 :Float32;
+  lightsShare @12 :Float32;        # share of passes spent looking for lights and signs right now
+
+  struct TrafficLight {
+    state @0 :LightState;
+    confidence @1 :Float32;        # 0-1
+    distance @2 :Float32;          # m from the front bumper to the nearest relevant head, NaN when unknown
+    bearing @3 :Float32;           # rad, right positive
+    stateAge @4 :Float32;          # s the state has held
+    headCount @5 :UInt8;           # relevant heads in view
+    flashing @6 :Bool;             # flashing red (a stop sign) or flashing yellow (caution)
+    arrow @7 :Arrow;               # the state is an arrow's, for the way the planned path goes
+  }
+
+  enum Arrow {
+    none @0;
+    left @1;
+    right @2;
+    straight @3;
+    other @4;
+  }
+
+  struct StopSign {
+    present @0 :Bool;
+    distance @1 :Float32;          # m from the front bumper, NaN when none
+    confidence @2 :Float32;
+  }
+
+  enum LightState {
+    unknown @0;
+    red @1;
+    yellow @2;
+    green @3;
+  }
+
+  struct Vehicle {
+    trackId @0 :UInt32;
+    dRel @1 :Float32;              # m from the front bumper, like radarState
+    yRel @2 :Float32;              # m, left positive, like radarState
+    vRel @3 :Float32;              # m/s, negative when closing
+    lane @4 :Int8;                 # 0 ours, -1 left, 1 right, and so on
+    kind @5 :VehicleKind;
+    confidence @6 :Float32;
+    age @7 :Float32;               # s since first seen
+    lastSeen @8 :Float32;          # s since last sighted
+    camera @9 :UInt8;              # 0 road, 1 wide
+    braking @10 :Bool;             # its brake lights came on
+    lateralSpeed @11 :Float32;     # m/s, left positive
+    merging @12 :Bool;             # drifting into our lane from the next one
+  }
+
+  enum VehicleKind {
+    car @0;
+    motorcycle @1;
+    bus @2;
+    truck @3;
+    pedestrian @4;
+    cyclist @5;
+  }
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

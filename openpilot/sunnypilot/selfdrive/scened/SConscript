@@ -1,0 +1,34 @@
+import glob
+import os
+from SCons.Script import Action, Value
+from openpilot.common.file_chunker import chunk_file, get_chunk_targets
+
+Import('env', 'arch')
+lenv = env.Clone()
+
+# compiles the scene detector to a tinygrad program, the same way modeld compiles the driver monitoring model
+tinygrad_root = env.Dir("#").abspath
+tinygrad_files = ["#"+x for x in glob.glob(env.Dir("#tinygrad_repo").relpath + "/**", recursive=True, root_dir=tinygrad_root)
+                  if 'pycache' not in x and os.path.isfile(os.path.join(tinygrad_root, x))]
+
+if arch == 'comma_arm64':
+  tg_flags = 'DEV=QCOM IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
+else:
+  tg_flags = 'DEV=CPU' if arch == 'Darwin' else 'DEV=CPU:LLVM'
+mac_brew_string = f'HOME={os.path.expanduser("~")}' if arch == 'Darwin' else ''
+pythonpath_string = 'PYTHONPATH="${PYTHONPATH}:' + env.Dir("#tinygrad_repo").abspath + '"'
+
+fn = File("models/scene_detector").abspath
+onnx_path = fn + ".onnx"
+pkl = fn + "_tinygrad.pkl"
+chunk_targets = get_chunk_targets(pkl, 2.0 * os.path.getsize(onnx_path) + 10 * 1024 * 1024)
+
+def do_chunk(target, source, env):
+  chunk_file(pkl, chunk_targets)
+
+lenv.Command(
+  chunk_targets,
+  [onnx_path] + tinygrad_files + [Value(chunk_targets), Value(tg_flags)],
+  [f'{pythonpath_string} {tg_flags} {mac_brew_string} python3 {Dir("#tinygrad_repo").abspath}/examples/openpilot/compile3.py {onnx_path} {pkl}',
+   Action(do_chunk, "  [CHUNK] $TARGET")],
+)
