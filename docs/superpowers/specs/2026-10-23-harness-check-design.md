@@ -43,9 +43,13 @@ blocked frames (+192) and are ignored (Cabana treats them the same way).
 
 Pure Python, no openpilot runtime imports, so it is unit-testable anywhere.
 
-- `HarnessTally`: `ingest(src, address, length)` counts frames per `(bus, address)`, total frames
-  and distinct addresses per bus, and the longest frame seen. `elapsed` is tracked by the caller.
-- `classify(tally, seconds, decision) -> dict`: returns the result written to the `HarnessCheck`
+- `HarnessTally`: `ingest(t_ns, src, address, length)` counts frames per `(bus, address)` with when
+  each was first and last seen, the longest frame, and the CAN time span (`seconds`, from the frames'
+  own `logMonoTime`). `hz(key)` is a message's rate over its own span, so a camera that starts late
+  still reads its true rate.
+- `Stamp(t, mono, boot)`: wall clock (only shown as a date), `time.monotonic()` and the kernel boot id
+  (`/proc/sys/kernel/random/boot_id`, `""` where absent).
+- `classify(tally, decision, stamp) -> dict`: returns the result written to the `HarnessCheck`
   param.
   - `offset = 4 * (max active bus // 4)`; `camera_bus = 2 + offset`.
   - A message counts as present on a bus only with at least `MIN_FRAMES = 20` frames.
@@ -59,21 +63,33 @@ Pure Python, no openpilot runtime imports, so it is unit-testable anywhere.
        will treat the car as non-HDA2)
     5. `LFA` or `LFA_ALT` only on other buses → `swap_likely`
     6. otherwise → `inconclusive` ("No steering messages seen yet.")
-  - Result fields: `verdict`, `title`, `detail`, `action`, `camera_bus`, `buses` (per bus: frames,
-    ids, and for each of the four messages the frame count and rate in Hz), `seconds`, `final`,
-    `decision` (openpilot's own fingerprint decision, see below), `t` (wall-clock seconds).
+  - Result fields: `verdict`, `title`, `detail`, `action`, `camera_bus`, `can_fd`, `buses` (per bus:
+    frames, ids, and for each steering message with at least `MIN_FRAMES` frames its count and rate in
+    Hz), `seconds`, `final`, `decision` (openpilot's own fingerprint decision, see below),
+    `disagrees`, `t`, `mono`, `boot`.
 - `decision` input: `{"recognized": bool, "car": str, "hda2": bool | None}`, built by `harnessd`
   from `CarParams` (`brand == "hyundai"` and `HyundaiFlags.CANFD_LKA_STEER_MSG`). The result
   notes when openpilot's decision disagrees with what the bus shows.
-- `result_html(result) -> str`: the popup body (verdict, action, per-bus table, decision, time).
+- `HarnessSession`: the write cadence. `due()` every `PROVISIONAL_PERIOD_S` of CAN time until a final
+  result has been written; `result(decision, stamp)` classifies and sets `final` (`is_final()`);
+  `finish(result)` is called only after the params write succeeded, so a failed write is retried;
+  `changed` reports verdict transitions for logging.
+- `settled(result, drive_start, boot)` / `alert_text(result, drive_start, boot)`: a result belongs to
+  this drive only if its `boot` matches and its `mono` is at or after the drive's start; the alert
+  needs a final result with a swap verdict.
+- The popup body is built UI-side in `openpilot/selfdrive/ui/sunnypilot/harness_status.py`
+  (`harness_status_html(result)`), next to `scene_status.py`, using `comm_issue_watch._safe`. The
+  settings viewer has no tables, so the per-bus breakdown is a list.
 
 ### 2. Service: `openpilot/sunnypilot/selfdrive/harness/harnessd.py`
 
 - Process `harnessd`, gate `and_(only_onroad, harness_check_enabled)`, `enabled=not PC`.
-- Subscribes to `can`, feeds every frame to `HarnessTally`.
-- Writes a provisional result to `HarnessCheck` every 2 s; the final result at 15 s. If still
-  `inconclusive` at 15 s, keeps listening and re-checks every 2 s until 60 s, then writes it final.
-- After the final write it closes the socket and idles (sleep loop) until the manager stops it.
+- Subscribes to `can`, feeds every frame to the session's `HarnessTally`.
+- Writes a provisional result to `HarnessCheck` every 2 s of CAN time; the final result at 15 s. If
+  still `inconclusive` at 15 s, keeps listening and re-checks every 2 s until 60 s, then writes it final.
+- Reads `CarParams` on every write (it can still hold the previous drive's car for the first seconds).
+- Logs each verdict change; after the final write it closes the socket and idles (sleep loop) until
+  the manager stops it.
 - Never transmits. Exceptions inside one cycle are logged with `cloudlog.exception` and the loop
   continues.
 
@@ -87,10 +103,12 @@ Pure Python, no openpilot runtime imports, so it is unit-testable anywhere.
 ### 4. Onroad alert: `openpilot/selfdrive/ui/sunnypilot/onroad/overlays/harness_alert.py`
 
 - `HarnessAlert`, added to `HUD_OVERLAY_TYPES`; independent of Drive Notifications.
-- Reads `HarnessCheck` at most once a second while onroad and the toggle is on.
-- Shows a red card for 30 s when this drive's result (`t` at or after the drive started) has
-  verdict `swap_needed` or `swap_likely`: the result's `title`, plus "Settings → Developer →
-  Harness Check". Nothing for other verdicts.
+- Records `time.monotonic()` when the drive starts; reads `HarnessCheck` at most once a second
+  while onroad and the toggle is on, and stops reading once this drive's result is final.
+- Shows a red card for 30 s when this drive's final result has verdict `swap_needed` or
+  `swap_likely`: the result's `title`, plus "Settings > Developer > Harness Check" (ASCII; the font
+  may lack an arrow glyph). Nothing for other verdicts or provisional results: in the first seconds
+  the ADAS ECU's LFA can arrive before the camera's LKAS.
 
 ### 5. Wiring
 
@@ -106,7 +124,8 @@ Pure Python, no openpilot runtime imports, so it is unit-testable anywhere.
   (camera bus 6); single stray frames below `MIN_FRAMES`; non-CAN-FD traffic; TX echo / blocked
   frames ignored; decision disagreement note; result shape (contract) and HTML rendering of every
   verdict plus `None`/empty input.
-- `harnessd` timing logic is factored into a pure `HarnessSchedule` and tested the same way.
+- `harnessd` timing logic lives in the pure `HarnessSession` and is tested the same way, as are
+  `settled`/`alert_text` (provisional, earlier drive, earlier boot) and `harness_status_html`.
 - The overlay and settings item follow the existing overlay/settings test patterns; those need the
   Linux openpilot environment.
 
