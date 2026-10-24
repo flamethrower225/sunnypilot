@@ -70,6 +70,13 @@ def run(cmd: list[str], cwd: str | None = None) -> str:
   return subprocess.check_output(cmd, cwd=cwd, stderr=subprocess.STDOUT, encoding='utf8')
 
 
+def git_fetch_cmd(branch: str) -> list[str]:
+  # No submodule recursion: on-demand fetching would download every submodule commit pinned anywhere in the newly
+  # fetched history, and one that no longer exists upstream ("not our ref") fails the whole fetch. The pinned
+  # submodule commits are fetched afterwards by `git submodule update --init --recursive`.
+  return ["git", "fetch", "--no-recurse-submodules", "origin", branch]
+
+
 def set_consistent_flag(consistent: bool) -> None:
   os.sync()
   consistent_file = Path(os.path.join(FINALIZED, ".overlay_consistent"))
@@ -369,7 +376,7 @@ class Updater:
     run(["git", "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], OVERLAY_MERGED)
 
     branch = self.target_branch
-    git_fetch_output = run(["git", "fetch", "origin", branch], OVERLAY_MERGED)
+    git_fetch_output = run(git_fetch_cmd(branch), OVERLAY_MERGED)
     cloudlog.info("git fetch success: %s", git_fetch_output)
 
     cloudlog.info("git reset in progress")
