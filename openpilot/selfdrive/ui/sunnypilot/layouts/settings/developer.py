@@ -20,6 +20,7 @@ from openpilot.system.ui.widgets.list_view import button_item
 
 from openpilot.selfdrive.ui.sunnypilot.comm_issue_watch import comm_issues_html
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.dash_research import DashResearchItems
+from openpilot.selfdrive.ui.sunnypilot.layouts.settings.harness_check import HarnessCheckItems
 from openpilot.selfdrive.ui.sunnypilot.scene_status import scene_status_html
 from openpilot.system.ui.sunnypilot.widgets.html_render import HtmlModalSP
 from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp
@@ -62,10 +63,11 @@ class DeveloperLayoutSP(DeveloperLayout):
                                         tr("How Camera Object Detection is running: passes per second, how often it was held back, how its " +
                                            "distances are calibrated against the radar, and what it saw last."),
                                         callback=self._on_scene_status_clicked)
+    self.harness_check = HarnessCheckItems()
     self.dash_research = DashResearchItems()
 
     self.items: list = [self.show_advanced_controls, self.enable_github_runner_toggle, self.enable_copyparty_toggle, self.prebuilt_toggle, self.error_log_btn,
-                        self.comm_issue_btn, self.scene_status_btn, *self.dash_research.items]
+                        self.comm_issue_btn, self.scene_status_btn, *self.harness_check.items, *self.dash_research.items]
 
   @staticmethod
   def _on_prebuilt_toggled(state):
@@ -127,4 +129,5 @@ class DeveloperLayoutSP(DeveloperLayout):
     self.enable_copyparty_toggle.set_visible(show_advanced)
     self.enable_github_runner_toggle.set_visible(show_advanced and not self._is_release_branch)
     self.error_log_btn.set_visible(not self._is_release_branch)
+    self.harness_check.update_state()
     self.dash_research.update_state()

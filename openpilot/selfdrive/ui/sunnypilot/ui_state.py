@@ -190,6 +190,7 @@ class UIStateSP:
     self.driver_flags = self.params.get_bool("DriverFlags")
     self.follow_ghost = self.params.get_bool("FollowGhost")
     self.hard_brake_flash = self.params.get_bool("HardBrakeFlash")
+    self.harness_check = self.params.get_bool("HarnessCheckEnabled")
     self.pace_border = self.params.get_bool("PaceBorder")
     self.drive_notifications = self.params.get_bool("DriveNotifications")
     self.scene_detection = self.params.get_bool("SceneDetection")
