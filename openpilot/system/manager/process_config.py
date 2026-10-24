@@ -71,6 +71,9 @@ def livestream(started: bool, params: Params, CP: car.CarParams) -> bool:
 def dash_re_enabled(started, params, CP: car.CarParams) -> bool:
   return params.get_bool("DashReEnabled")
 
+def harness_check_enabled(started, params, CP: car.CarParams) -> bool:
+  return params.get_bool("HarnessCheckEnabled")
+
 def scene_detection_enabled(started, params, CP: car.CarParams) -> bool:
   return params.get_bool("SceneDetection")
 
@@ -189,6 +192,9 @@ procs += [
 
   # dash research: listen-only CAN findings for the instrument cluster
   PythonProcess("dashred", "openpilot.sunnypilot.tools.dash_re.dashred", and_(only_onroad, dash_re_enabled)),
+
+  # harness check: which bus the camera's steering messages arrive on, listen-only
+  PythonProcess("harnessd", "openpilot.sunnypilot.selfdrive.harness.harnessd", and_(only_onroad, harness_check_enabled), enabled=not PC),
 
   # camera object detection: traffic light state and the cars around us
   PythonProcess("scened", "openpilot.sunnypilot.selfdrive.scened.scened", and_(only_onroad, scene_detection_enabled), enabled=not PC),

@@ -171,6 +171,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"EnableGithubRunner", {PERSISTENT | BACKUP, BOOL}},
     {"GreenLightAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"GithubRunnerSufficientVoltage", {CLEAR_ON_MANAGER_START , BOOL}},
+    {"HarnessCheck", {PERSISTENT, JSON}},
+    {"HarnessCheckEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"HasAcceptedTermsSP", {PERSISTENT, STRING, "0"}},
     {"HideVEgoUI", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"IntelligentCruiseButtonManagement", {PERSISTENT | BACKUP , BOOL}},
