@@ -118,6 +118,19 @@ Pure Python, no openpilot runtime imports, so it is unit-testable anywhere.
 - `openpilot/selfdrive/ui/sunnypilot/layouts/settings/developer.py`: add the items.
 - `openpilot/selfdrive/ui/sunnypilot/ui_state.py`: `harness_check` toggle flag.
 
+### 6. Radar survey: `openpilot/sunnypilot/selfdrive/harness/radar_survey.py`
+
+Added 2026-10-23 so a car's radar layout can be read without SSH. Pure, fed by the same tally and window.
+
+- Ranges (from the upstream `hyundai-radar-tracks` research): `500` (0x500, 64 slots, 8 B), `602` (0x602, 22, 8 B),
+  `210` (0x210, 16, 32 B), `3A5` (0x3A5, 32, 24 B), `3D0` aux (0x3D0, 5, 32 B), `235` camera objects (0x235, 20, 32 B).
+- A range counts on a bus when at least half its addresses (minimum 2) have `MIN_FRAMES` frames. Each entry: bus, addresses
+  present of expected, frame sizes, median rate, and the latest raw frame of the range's first address (hex).
+- Verdict: `supported_210`, `size_match_3a5` (size matches, payload unconfirmed: the 2026 Sportage sample did not decode),
+  `unknown_layout` (210/3A5 at another size), `legacy` (500/602), `none`. Camera and aux ranges are listed but never radar.
+- The tally records each ID's frame size when first seen and the latest frame for the six range-start addresses only.
+- Shown as a "Radar" section on the result page; no alert.
+
 ## Testing
 
 - `harness/tests/test_harness_check.py` (pure, runs on Windows): every verdict row; second panda

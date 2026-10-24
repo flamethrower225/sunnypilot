@@ -73,6 +73,26 @@ def test_dynamic_text_is_escaped():
   assert "<b>bad</b>" not in html and "<CAR>" not in html
 
 
+def test_radar_section_lists_each_range():
+  r = result(2)
+  r["radar"] = {"verdict": "size_match_3a5", "title": "3A5 radar on bus 1: layout unconfirmed", "detail": "Check the sample frame.",
+                "ranges": [{"range": "3A5", "kind": "radar", "bus": 1, "present": 32, "expected": 32, "sizes": [24], "hz": 20.0,
+                            "sample": "a5003b00"},
+                           {"range": "235", "kind": "camera", "bus": 1, "present": 20, "expected": 20, "sizes": [32], "hz": 33.0,
+                            "sample": ""}]}
+  html = harness_status_html(r)
+  assert "<h3>Radar</h3><p>3A5 radar on bus 1: layout unconfirmed: Check the sample frame.</p>" in html
+  assert "<li>3A5 on bus 1: 32 of 32 addresses, 24 B, 20.0 Hz; sample a5003b00</li>" in html
+  assert "<li>235 (camera objects, not radar) on bus 1: 20 of 20 addresses, 32 B, 33.0 Hz</li>" in html
+
+
+def test_no_radar_ranges_still_shows_the_verdict():
+  r = result(2)
+  r["radar"] = {"verdict": "none", "title": "No radar tracks found", "detail": "Radar is off.", "ranges": []}
+  html = harness_status_html(r)
+  assert "<h3>Radar</h3><p>No radar tracks found: Radar is off.</p>" in html and "<ul><li>3A5" not in html
+
+
 def test_tolerates_missing_fields():
   html = harness_status_html({"verdict": "swap_needed", "title": "Pin swap needed"})
   assert "Pin swap needed" in html

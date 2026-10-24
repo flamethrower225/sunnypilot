@@ -307,7 +307,7 @@ class TestSession:
 
 class TestResultContract:
   KEYS = {"verdict", "title", "detail", "action", "camera_bus", "can_fd", "seconds", "t", "mono", "boot", "buses", "decision", "disagrees",
-          "final"}
+          "radar", "final"}
 
   @pytest.mark.parametrize("setup", ["ok", "swap", "non_hda2", "likely", "nothing", "empty", "classic"])
   def test_every_verdict_has_the_full_shape_and_is_json(self, setup):

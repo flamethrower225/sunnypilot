@@ -42,7 +42,7 @@ def main() -> None:
   while not session.final:
     for msg in messaging.drain_sock(sock, wait_for_one=True):
       for c in msg.can:
-        session.tally.ingest(msg.logMonoTime, c.src, c.address, len(c.dat))
+        session.tally.ingest(msg.logMonoTime, c.src, c.address, len(c.dat), c.dat)
 
     if not session.due():
       continue

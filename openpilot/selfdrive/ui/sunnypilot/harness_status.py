@@ -33,6 +33,16 @@ def _bus_line(bus: dict, camera_bus: int | None) -> str:
   return f"{label}: {bus.get('frames', 0)} frames, {ids} message ID{'' if ids == 1 else 's'}; {seen}"
 
 
+def _radar_line(r: dict) -> str:
+  kind = {"camera": " (camera objects, not radar)", "aux": " (radar side data)"}.get(r.get("kind", ""), "")
+  sizes = "/".join(str(s) for s in r.get("sizes", []))
+  line = f"{_safe(r.get('range', '?'))}{kind} on bus {r.get('bus')}: {r.get('present', 0)} of {r.get('expected', 0)} addresses, " + \
+         f"{sizes} B, {r.get('hz', 0)} Hz"
+  if r.get("sample"):
+    line += f"; sample {_safe(r['sample'])}"
+  return line
+
+
 def harness_status_html(result: dict | None) -> str:
   if not result:
     return ("<h2>No harness check yet</h2><p>Turn the car on with the comma plugged in; the result shows here about 15 seconds " +
@@ -51,6 +61,13 @@ def harness_status_html(result: dict | None) -> str:
   if buses:
     parts.append("<h3>What arrived on each bus</h3><ul>" +
                  "".join(f"<li>{_bus_line(b, result.get('camera_bus'))}</li>" for b in buses) + "</ul>")
+
+  radar = result.get("radar")
+  if radar:
+    parts.append(f"<h3>Radar</h3><p>{_safe(radar.get('title', ''))}: {_safe(radar.get('detail', ''))}</p>")
+    lines = [_radar_line(r) for r in radar.get("ranges") or []]
+    if lines:
+      parts.append("<ul>" + "".join(f"<li>{line}</li>" for line in lines) + "</ul>")
 
   if "t" in result:
     when = time.strftime("%d-%b-%Y %H:%M:%S", time.localtime(result["t"])).upper()

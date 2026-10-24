@@ -15,6 +15,8 @@ Pure Python with no openpilot runtime imports, so it can be tested anywhere. har
 from enum import StrEnum
 from typing import NamedTuple
 
+from openpilot.sunnypilot.selfdrive.harness.radar_survey import SAMPLE_ADDRS, survey
+
 LKAS, LKAS_ALT, LFA, LFA_ALT = 0x50, 0x110, 0x12A, 0xCB
 HDA2_MSGS = {LKAS: "LKAS", LKAS_ALT: "LKAS_ALT"}
 NON_HDA2_MSGS = {LFA: "LFA", LFA_ALT: "LFA_ALT"}
@@ -68,11 +70,13 @@ class HarnessTally:
     self.counts: dict[tuple[int, int], int] = {}
     self.first_seen: dict[tuple[int, int], int] = {}
     self.last_seen: dict[tuple[int, int], int] = {}
+    self.sizes: dict[tuple[int, int], int] = {}       # frame size when first seen: a CAN ID keeps its size
+    self.samples: dict[tuple[int, int], bytes] = {}   # latest raw frame, only for the radar survey's range-start addresses
     self.max_len = 0
     self.first_ns: int | None = None
     self.last_ns = 0
 
-  def ingest(self, t_ns: int, src: int, address: int, length: int) -> None:
+  def ingest(self, t_ns: int, src: int, address: int, length: int, dat: bytes | None = None) -> None:
     if src >= SENT_SRC:
       return
     if self.first_ns is None:
@@ -82,6 +86,9 @@ class HarnessTally:
     n = self.counts.get(key, 0)
     if n == 0:
       self.first_seen[key] = t_ns
+      self.sizes[key] = length
+    if dat is not None and address in SAMPLE_ADDRS:
+      self.samples[key] = bytes(dat)
     self.counts[key] = n + 1
     self.last_seen[key] = t_ns
     if length > self.max_len:
@@ -185,7 +192,8 @@ def classify(tally: HarnessTally, decision: dict | None, stamp: Stamp) -> dict:
 
   return {"verdict": str(verdict), "title": title, "detail": detail, "action": action, "camera_bus": cam,
           "can_fd": tally.max_len > CLASSIC_CAN_MAX_LEN, "seconds": round(tally.seconds, 1), "t": stamp.t, "mono": stamp.mono,
-          "boot": stamp.boot, "buses": breakdown, "decision": decision, "disagrees": _disagrees(verdict, decision), "final": False}
+          "boot": stamp.boot, "buses": breakdown, "decision": decision, "disagrees": _disagrees(verdict, decision),
+          "radar": survey(tally), "final": False}
 
 
 def is_final(seconds: float, verdict: str) -> bool:
