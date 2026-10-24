@@ -97,7 +97,7 @@ Pure Python, no openpilot runtime imports, so it is unit-testable anywhere.
 
 `HarnessCheckItems`, added to the Developer panel next to Dash Research:
 - toggle "Harness Check" (`HarnessCheckEnabled`)
-- "Harness Check Result" — VIEW opens `HtmlModalSP(result_html(params.get("HarnessCheck")))`;
+- "Harness Check Result" — VIEW opens `HtmlModalSP(harness_status_html(params.get("HarnessCheck")))`;
   visible only when the toggle is on.
 
 ### 4. Onroad alert: `openpilot/selfdrive/ui/sunnypilot/onroad/overlays/harness_alert.py`
